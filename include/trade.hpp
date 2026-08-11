@@ -8,7 +8,7 @@ public:
 
     int getBuyOrderId() const noexcept{return buyOrderId_; }
     int getSellOrderId() const noexcept {return sellOrderId_; }
-    int getPrice() const noexcept {return quantity_; }
+    int getPrice() const noexcept {return price_; }
     int getQuantity() const noexcept {return quantity_; }
 
 private:
