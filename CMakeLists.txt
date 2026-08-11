@@ -34,6 +34,11 @@ add_library(
     src/order.cpp
     src/trade.cpp
     src/command_parser.cpp
+    src/logger.cpp
+    src/order_book.cpp
+    src/matching_engine.cpp
+    src/report_printer.cpp
+    src/application.cpp
 )
 
 target_include_directories(
@@ -49,11 +54,25 @@ target_link_libraries(
     spdlog::spdlog
 )
 
+add_executable(
+    matching_engine
+    src/main.cpp
+)
+
+target_link_libraries(
+    matching_engine
+    PRIVATE
+    matching_engine_lib
+)
+
 enable_testing()
 
-add_executable(matching_engine_tests
+add_executable(
+    matching_engine_tests
     tests/order_tests.cpp
     tests/command_parser_tests.cpp
+    tests/order_book_tests.cpp
+    tests/matching_engine_tests.cpp
 )
 
 target_include_directories(
