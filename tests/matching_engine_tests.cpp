@@ -14,6 +14,9 @@ static CancelCommand makeCancel(int id)
     return CancelCommand(id);
 }
 
+static MarketAddCommand marketBuy(int id, Side side, int qty){
+    return MarketAddCommand(id, side, qty);
+}
 // ─── ADD без совпадений ───────────────────────────────────────────────────────
 
 TEST(MatchingEngineTest, AddBuyNoMatch)
@@ -226,4 +229,160 @@ TEST(MatchingEngineTest, TradesAccumulate)
     engine.process(makeAdd(4, Side::Buy,  100, 5));
 
     EXPECT_EQ(engine.trades().size(), 2u);
+}
+
+
+TEST(MatchingEngineTest, MarketBuyFullyFilled) {
+    MatchingEngine engine;
+
+    AddCommand sellCmd(1, Side::Sell, 100, 5);
+    engine.process(sellCmd);
+
+    MarketAddCommand marketBuy(2, Side::Buy, 5);
+    engine.process(marketBuy);
+
+    const auto& trades = engine.trades();
+    ASSERT_EQ(trades.size(), 1u);
+    EXPECT_EQ(trades[0].getPrice(),    100);
+    EXPECT_EQ(trades[0].getQuantity(), 5);
+    EXPECT_EQ(trades[0].getBuyOrderId(),  2);
+    EXPECT_EQ(trades[0].getSellOrderId(), 1);
+
+    EXPECT_EQ(engine.orderBook().bestSell(), nullptr);
+}
+
+TEST(MatchingEngineTest, MarketBuyPartiallyFilled) {
+    MatchingEngine engine;
+
+    AddCommand sellCmd(1, Side::Sell, 100, 3);
+    engine.process(sellCmd);
+
+    MarketAddCommand marketBuy(2, Side::Buy, 10);
+    engine.process(marketBuy);
+
+    const auto& trades = engine.trades();
+    ASSERT_EQ(trades.size(), 1u);
+    EXPECT_EQ(trades[0].getQuantity(), 3);
+
+    EXPECT_EQ(engine.orderBook().findOrder(2), nullptr);
+}
+
+TEST(MatchingEngineTest, MarketBuyNoSellers) {
+    MatchingEngine engine;
+
+    MarketAddCommand marketBuy(1, Side::Buy, 10);
+    engine.process(marketBuy);
+
+    EXPECT_TRUE(engine.trades().empty());
+    EXPECT_EQ(engine.orderBook().findOrder(1), nullptr);
+}
+
+TEST(MatchingEngineTest, MarketSellFullyFilled) {
+    MatchingEngine engine;
+
+    AddCommand buyCmd(1, Side::Buy, 100, 5);
+    engine.process(buyCmd);
+
+    MarketAddCommand marketSell(2, Side::Sell, 5);
+    engine.process(marketSell);
+
+    const auto& trades = engine.trades();
+    ASSERT_EQ(trades.size(), 1u);
+    EXPECT_EQ(trades[0].getPrice(),    100);
+    EXPECT_EQ(trades[0].getQuantity(), 5);
+    EXPECT_EQ(trades[0].getBuyOrderId(),  1);
+    EXPECT_EQ(trades[0].getSellOrderId(), 2);
+}
+
+TEST(MatchingEngineTest, MarketBuyMatchesMultipleLevels) {
+    MatchingEngine engine;
+
+    AddCommand sell1(1, Side::Sell, 100, 3);
+    AddCommand sell2(2, Side::Sell, 101, 4);
+    engine.process(sell1);
+    engine.process(sell2);
+
+    MarketAddCommand marketBuy(3, Side::Buy, 7);
+    engine.process(marketBuy);
+
+    const auto& trades = engine.trades();
+    ASSERT_EQ(trades.size(), 2u);
+    EXPECT_EQ(trades[0].getPrice(),    100);
+    EXPECT_EQ(trades[0].getQuantity(), 3);
+    EXPECT_EQ(trades[1].getPrice(),    101);
+    EXPECT_EQ(trades[1].getQuantity(), 4);
+
+    EXPECT_EQ(engine.orderBook().bestSell(), nullptr);
+}
+
+TEST(MatchingEngineTest, MarketOrderNotLeftInBook) {
+    MatchingEngine engine;
+
+    MarketAddCommand marketBuy(1, Side::Buy, 5);
+    engine.process(marketBuy);
+
+    EXPECT_EQ(engine.orderBook().findOrder(1), nullptr);
+    EXPECT_TRUE(engine.orderBook().empty());
+}
+
+
+TEST(MatchingEngineTest, ModifyChangesPrice) {
+    MatchingEngine engine;
+
+    AddCommand buyCmd(1, Side::Buy, 100, 10);
+    engine.process(buyCmd);
+
+    ModifyCommand modCmd(1, 110, 5);
+    engine.process(modCmd);
+
+    auto order = engine.orderBook().findOrder(1);
+    ASSERT_NE(order, nullptr);
+    EXPECT_EQ(order->getPrice(),    110);
+    EXPECT_EQ(order->getQuantity(), 5);
+}
+
+TEST(MatchingEngineTest, ModifyTriggersMatch) {
+    MatchingEngine engine;
+
+    AddCommand sellCmd(1, Side::Sell, 105, 5);
+    engine.process(sellCmd);
+
+    AddCommand buyCmd(2, Side::Buy, 100, 10);
+    engine.process(buyCmd);
+
+    EXPECT_TRUE(engine.trades().empty());
+
+    ModifyCommand modCmd(2, 105, 10);
+    engine.process(modCmd);
+
+    const auto& trades = engine.trades();
+    ASSERT_EQ(trades.size(), 1u);
+    EXPECT_EQ(trades[0].getPrice(),    105);
+    EXPECT_EQ(trades[0].getQuantity(), 5);
+}
+
+TEST(MatchingEngineTest, ModifyLosesTimePriority) {
+    MatchingEngine engine;
+
+    AddCommand buy1(1, Side::Buy, 100, 5);
+    AddCommand buy2(2, Side::Buy, 100, 5);
+    engine.process(buy1);
+    engine.process(buy2);
+
+    ModifyCommand modCmd(1, 100, 5);
+    engine.process(modCmd);
+
+    AddCommand sellCmd(3, Side::Sell, 100, 5);
+    engine.process(sellCmd);
+
+    const auto& trades = engine.trades();
+    ASSERT_EQ(trades.size(), 1u);
+    EXPECT_EQ(trades[0].getBuyOrderId(), 2);
+}
+
+TEST(MatchingEngineTest, ModifyNonExistentOrder) {
+    MatchingEngine engine;
+
+    ModifyCommand modCmd(999, 100, 10);
+    EXPECT_THROW(engine.process(modCmd), OrderBookError);
 }

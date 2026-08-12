@@ -124,3 +124,90 @@ TEST(CommandParserTest, AddUnknownSideThrows)
         ParseError
     );
 }
+
+TEST(CommandParserTest, ParseMarketAdd) {
+    CommandParser parser;
+    const auto json = nlohmann::json::parse(R"({
+        "type": "ADD",
+        "order_type": "MARKET",
+        "id": 5,
+        "side": "BUY",
+        "quantity": 10
+    })");
+
+    const auto cmd = parser.parse(json);
+    ASSERT_NE(cmd, nullptr);
+
+    const auto* market = dynamic_cast<const MarketAddCommand*>(cmd.get());
+    ASSERT_NE(market, nullptr);
+    EXPECT_EQ(market->id_,       5);
+    EXPECT_EQ(market->side_,     Side::Buy);
+    EXPECT_EQ(market->quantity_, 10);
+}
+
+TEST(CommandParserTest, ParseMarketAddMissingQuantity) {
+    CommandParser parser;
+    const auto json = nlohmann::json::parse(R"({
+        "type": "ADD",
+        "order_type": "MARKET",
+        "id": 5,
+        "side": "BUY"
+    })");
+
+    EXPECT_THROW(parser.parse(json), ParseError);
+}
+
+TEST(CommandParserTest, ParseUnknownOrderType) {
+    CommandParser parser;
+    const auto json = nlohmann::json::parse(R"({
+        "type": "ADD",
+        "order_type": "FOO",
+        "id": 5,
+        "side": "BUY",
+        "quantity": 10
+    })");
+
+    EXPECT_THROW(parser.parse(json), ParseError);
+}
+
+TEST(CommandParserTest, ParseModify) {
+    CommandParser parser;
+    const auto json = nlohmann::json::parse(R"({
+        "type": "MODIFY",
+        "id": 10,
+        "price": 105,
+        "quantity": 20
+    })");
+
+    const auto cmd = parser.parse(json);
+    ASSERT_NE(cmd, nullptr);
+
+    const auto* modify = dynamic_cast<const ModifyCommand*>(cmd.get());
+    ASSERT_NE(modify, nullptr);
+    EXPECT_EQ(modify->id_,       10);
+    EXPECT_EQ(modify->price_,    105);
+    EXPECT_EQ(modify->quantity_, 20);
+}
+
+TEST(CommandParserTest, ParseModifyMissingPrice) {
+    CommandParser parser;
+    const auto json = nlohmann::json::parse(R"({
+        "type": "MODIFY",
+        "id": 10,
+        "quantity": 20
+    })");
+
+    EXPECT_THROW(parser.parse(json), ParseError);
+}
+
+TEST(CommandParserTest, ParseModifyNegativePrice) {
+    CommandParser parser;
+    const auto json = nlohmann::json::parse(R"({
+        "type": "MODIFY",
+        "id": 10,
+        "price": -5,
+        "quantity": 20
+    })");
+
+    EXPECT_THROW(parser.parse(json), ParseError);
+}
