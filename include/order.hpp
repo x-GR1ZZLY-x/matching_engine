@@ -32,4 +32,21 @@ private:
     int quantity_;
 };
 
+class MarketOrder {
+public:
+    MarketOrder(int id, Side side, int quantity);
+
+    int getId()      const noexcept { return id_; }
+    Side getSide()   const noexcept { return side_; }
+    int getQuantity() const noexcept { return quantity_; }
+
+    void fill(int quantity);
+    bool isFilled() const noexcept { return quantity_ == 0; }
+
+private:
+    int id_;
+    Side side_;
+    int quantity_;
+};
+
 }

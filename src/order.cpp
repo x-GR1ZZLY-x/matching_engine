@@ -34,4 +34,18 @@ Side Order::sideFromString(const std::string& str){
     throw OrderError("Unknown order side");
 }
 
+MarketOrder::MarketOrder(int id, Side side, int quantity)
+    : id_(id), side_(side), quantity_(quantity)
+{
+    if (quantity <= 0) {
+        throw OrderError("Quantity must be positive");
+    }
+}
+
+void MarketOrder::fill(int quantity) {
+    if (quantity <= 0)        throw OrderError("Fill quantity must be positive");
+    if (quantity > quantity_) throw OrderError("Fill quantity exceeded");
+    quantity_ -= quantity;
+}
+
 }

@@ -14,6 +14,8 @@ public:
 private:
     std::unique_ptr<Command> parseAdd(const nlohmann::json& json) const;
     std::unique_ptr<Command> parseCancel(const nlohmann::json& json) const;
+    std::unique_ptr<Command> parseMarketAdd(const nlohmann::json& json) const;
+    std::unique_ptr<Command> parseModify(const nlohmann::json& json) const;
 
     const nlohmann::json& requireField(const nlohmann::json& json, const std::string& field) const;
     int requireInt(const nlohmann::json& json, const std::string& field) const;

@@ -36,6 +36,14 @@ std::string CommandParser::requireString(
 }
 
 std::unique_ptr<Command> CommandParser::parseAdd(const nlohmann::json& j) const {
+    if (j.contains("order_type")) {
+        const std::string orderType = requireString(j, "order_type");
+        if (orderType == "MARKET") {
+            return parseMarketAdd(j);
+        }
+        throw ParseError("Unknown order_type: " + orderType);
+    }
+
     const int id = requireInt(j, "id");
     const std::string sideStr = requireString(j, "side");
     const int price = requireInt(j, "price");
@@ -74,8 +82,39 @@ std::unique_ptr<Command> CommandParser::parse(const nlohmann::json& j) const{
     if(type == "ADD") return parseAdd(j);
     if(type == "CANCEL") return parseCancel(j);
     if(type == "PRINT") return std::make_unique<PrintCommand>();
+    if(type == "MODIFY") return parseModify(j);
 
     throw ParseError("Unknown command type");
+}
+
+std::unique_ptr<Command> CommandParser::parseMarketAdd(const nlohmann::json& j) const {
+    const int id = requireInt(j, "id");
+    const std::string sideStr = requireString(j, "side");
+    const int quantity = requireInt(j, "quantity");
+
+    Side side;
+    try {
+        side = Order::sideFromString(sideStr);
+    } catch (const OrderError& e) {
+        throw ParseError(std::string("Invalid side value: ") + e.what());
+    }
+
+    if (id <= 0)       throw ParseError("Id must be positive");
+    if (quantity <= 0) throw ParseError("Quantity must be positive");
+
+    return std::make_unique<MarketAddCommand>(id, side, quantity);
+}
+
+std::unique_ptr<Command> CommandParser::parseModify(const nlohmann::json& j) const {
+    const int id       = requireInt(j, "id");
+    const int price    = requireInt(j, "price");
+    const int quantity = requireInt(j, "quantity");
+
+    if (id <= 0)       throw ParseError("Id must be positive");
+    if (price <= 0)    throw ParseError("Price must be positive");
+    if (quantity <= 0) throw ParseError("Quantity must be positive");
+
+    return std::make_unique<ModifyCommand>(id, price, quantity);
 }
 
 }
