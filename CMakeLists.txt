@@ -26,8 +26,10 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(
     nlohmann_json
-    googletest 
+    googletest
     spdlog)
+
+find_package(PostgreSQL REQUIRED)
 
 add_library(
     matching_engine_lib
@@ -39,6 +41,9 @@ add_library(
     src/matching_engine.cpp
     src/report_printer.cpp
     src/application.cpp
+    src/pg_connection.cpp
+    src/pg_result.cpp
+    src/pg_transaction.cpp
 )
 
 target_include_directories(
@@ -48,10 +53,11 @@ target_include_directories(
 )
 
 target_link_libraries(
-    matching_engine_lib 
+    matching_engine_lib
     PUBLIC
     nlohmann_json::nlohmann_json
     spdlog::spdlog
+    PostgreSQL::PostgreSQL
 )
 
 add_executable(
@@ -73,6 +79,7 @@ add_executable(
     tests/command_parser_tests.cpp
     tests/order_book_tests.cpp
     tests/matching_engine_tests.cpp
+    tests/pg_wrapper_tests.cpp
 )
 
 target_include_directories(

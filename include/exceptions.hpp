@@ -35,4 +35,10 @@ public:
         : MatchingEngineError(message) {}
 };
 
+class DatabaseError : public MatchingEngineError{
+public:
+    explicit DatabaseError(const std::string& message)
+        : MatchingEngineError(message) {}
+};
+
 }
