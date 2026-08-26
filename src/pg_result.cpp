@@ -9,7 +9,7 @@ void PgResultDeleter::operator()(PGresult* result) const noexcept{
 
 PgResult::PgResult(PGresult* result) : result_(result){
     if(!result_){
-        throw DatabaseError("PQexecParams returned no result");
+        throw DatabaseError("libpq returned no result");
     }
 
     ExecStatusType status = PQresultStatus(result_.get());

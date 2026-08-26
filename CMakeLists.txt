@@ -45,6 +45,7 @@ add_library(
     src/pg_result.cpp
     src/pg_transaction.cpp
     src/database_config.cpp
+    src/schema.cpp
 )
 
 target_include_directories(
@@ -83,12 +84,22 @@ add_executable(
     tests/pg_wrapper_tests.cpp
     tests/database_config_tests.cpp
     tests/application_tests.cpp
+    tests/schema_tests.cpp
 )
 
 target_include_directories(
     matching_engine_tests
     PRIVATE
     include
+)
+
+# ctest запускает тесты с рабочим каталогом build/, а не корнем репозитория,
+# поэтому тесту схемы БД нужен абсолютный путь до database/ независимо от
+# того, откуда запущен ctest.
+target_compile_definitions(
+    matching_engine_tests
+    PRIVATE
+    MATCHING_ENGINE_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
 
 target_link_libraries(

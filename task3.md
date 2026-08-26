@@ -10,14 +10,14 @@
 
 | ID | Требование | Статус |
 |---|---|---|
-| REQ-DB-01 | СУБД — PostgreSQL | TODO |
-| REQ-DB-02 | Минимум три таблицы: `orders`, `trades`, `processed_commands` | TODO |
-| REQ-DB-03 | `orders` хранит: `order_id`, `side`, `price`, `initial_quantity`, `remaining_quantity`, `status`, `sequence_number` | TODO |
-| REQ-DB-04 | Статусы заявки: `OPEN`, `PARTIALLY_FILLED`, `FILLED`, `CANCELLED` | TODO |
-| REQ-DB-05 | `trades` хранит: `trade_id`, `buy_order_id`, `sell_order_id`, `price`, `quantity` | TODO |
-| REQ-DB-06 | `processed_commands` хранит: `command_id`, `command_type`, `status`, `result` | TODO |
-| REQ-DB-07 | SQL-схема лежит в репозитории в `database/`; расчёт на ручное создание таблиц через psql запрещён | TODO |
-| REQ-DB-08 | Определены индексы под запросы: поиск заявки по `order_id`, поиск команды по `command_id`, выборка активных заявок | TODO |
+| REQ-DB-01 | СУБД — PostgreSQL | ГОТОВО |
+| REQ-DB-02 | Минимум три таблицы: `orders`, `trades`, `processed_commands` | ГОТОВО |
+| REQ-DB-03 | `orders` хранит: `order_id`, `side`, `price`, `initial_quantity`, `remaining_quantity`, `status`, `sequence_number` | ГОТОВО |
+| REQ-DB-04 | Статусы заявки: `OPEN`, `PARTIALLY_FILLED`, `FILLED`, `CANCELLED` | ГОТОВО |
+| REQ-DB-05 | `trades` хранит: `trade_id`, `buy_order_id`, `sell_order_id`, `price`, `quantity` | ГОТОВО |
+| REQ-DB-06 | `processed_commands` хранит: `command_id`, `command_type`, `status`, `result` | ГОТОВО |
+| REQ-DB-07 | SQL-схема лежит в репозитории в `database/`; расчёт на ручное создание таблиц через psql запрещён | ГОТОВО |
+| REQ-DB-08 | Определены индексы под запросы: поиск заявки по `order_id`, поиск команды по `command_id`, выборка активных заявок | ГОТОВО |
 
 ## RAII — Обёртка над libpq
 

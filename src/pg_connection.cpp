@@ -1,7 +1,21 @@
 #include"pg_connection.hpp"
 #include"exceptions.hpp"
+#include"logger.hpp"
 
 namespace matching_engine{
+
+namespace{
+
+// Отводит вывод драйвером NOTICE- и WARNING-сообщений сервера (например,
+// "relation ... already exists, skipping" при идемпотентном повторном
+// применении схемы) из stderr процесса в Logger::debug — иначе они видны
+// при каждом обычном запуске в обход ReportPrinter/Logger. На отладочном
+// уровне логирования (SPDLOG_LEVEL=debug) сообщения по-прежнему видны.
+void discardNotice(void*, const char* message) noexcept{
+    Logger::instance().debug(message ? std::string(message) : std::string());
+}
+
+}
 
 void PgConnectionDeleter::operator()(PGconn* conn) const noexcept{
     PQfinish(conn);
@@ -17,6 +31,8 @@ PgConnection::PgConnection(const std::string& host, const std::string& port,
         std::string message = PQerrorMessage(conn_.get());
         throw DatabaseError("Failed to connect to database: " + message);
     }
+
+    PQsetNoticeProcessor(conn_.get(), discardNotice, nullptr);
 }
 
 PgResult PgConnection::execute(const std::string& sql,
@@ -44,6 +60,15 @@ PgResult PgConnection::execute(const std::string& sql,
         0);
 
     return PgResult(result);
+}
+
+PgResult PgConnection::executeScript(const std::string& sql){
+    if(!conn_){
+        throw DatabaseError("PgConnection::executeScript called without an active connection "
+            "(the connection was moved from)");
+    }
+
+    return PgResult(PQexec(conn_.get(), sql.c_str()));
 }
 
 }
