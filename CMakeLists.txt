@@ -46,6 +46,7 @@ add_library(
     src/pg_transaction.cpp
     src/database_config.cpp
     src/schema.cpp
+    src/sequence_generator.cpp
 )
 
 target_include_directories(
@@ -85,6 +86,7 @@ add_executable(
     tests/database_config_tests.cpp
     tests/application_tests.cpp
     tests/schema_tests.cpp
+    tests/sequence_generator_tests.cpp
 )
 
 target_include_directories(
