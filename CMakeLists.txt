@@ -44,6 +44,7 @@ add_library(
     src/pg_connection.cpp
     src/pg_result.cpp
     src/pg_transaction.cpp
+    src/database_config.cpp
 )
 
 target_include_directories(
@@ -80,6 +81,8 @@ add_executable(
     tests/order_book_tests.cpp
     tests/matching_engine_tests.cpp
     tests/pg_wrapper_tests.cpp
+    tests/database_config_tests.cpp
+    tests/application_tests.cpp
 )
 
 target_include_directories(

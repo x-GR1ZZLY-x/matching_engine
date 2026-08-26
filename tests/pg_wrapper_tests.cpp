@@ -24,7 +24,7 @@ std::string g_lastConnectFailure = "переменная MATCHING_ENGINE_DB_PASS
 // недоступна или пароль не задан — тогда интеграционные тесты пропускаются.
 std::optional<PgConnection> tryConnect(){
     const char* password = std::getenv("MATCHING_ENGINE_DB_PASSWORD");
-    if(!password){
+    if(!password || password[0] == '\0'){
         g_lastConnectFailure = "переменная MATCHING_ENGINE_DB_PASSWORD не задана";
         return std::nullopt;
     }

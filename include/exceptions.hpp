@@ -41,4 +41,10 @@ public:
         : MatchingEngineError(message) {}
 };
 
+class ConfigError : public MatchingEngineError{
+public:
+    explicit ConfigError(const std::string& message)
+        : MatchingEngineError(message) {}
+};
+
 }
