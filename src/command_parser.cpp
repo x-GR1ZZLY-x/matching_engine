@@ -79,12 +79,20 @@ std::unique_ptr<Command> CommandParser::parseCancel(const nlohmann::json& j) con
 std::unique_ptr<Command> CommandParser::parse(const nlohmann::json& j) const{
     const std::string type = requireString(j, "type");
 
-    if(type == "ADD") return parseAdd(j);
-    if(type == "CANCEL") return parseCancel(j);
-    if(type == "PRINT") return std::make_unique<PrintCommand>();
-    if(type == "MODIFY") return parseModify(j);
+    std::unique_ptr<Command> command;
+    if(type == "ADD") command = parseAdd(j);
+    else if(type == "CANCEL") command = parseCancel(j);
+    else if(type == "PRINT") command = std::make_unique<PrintCommand>();
+    else if(type == "MODIFY") command = parseModify(j);
+    else throw ParseError("Unknown command type");
 
-    throw ParseError("Unknown command type");
+    // command_id — необязательное поле на уровне парсера (задача 07, п.4):
+    // обязательность для изменяющих команд проверяет CommandProcessor.
+    if(j.contains("command_id")){
+        command->commandId_ = requireString(j, "command_id");
+    }
+
+    return command;
 }
 
 std::unique_ptr<Command> CommandParser::parseMarketAdd(const nlohmann::json& j) const {

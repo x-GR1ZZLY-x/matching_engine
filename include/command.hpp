@@ -1,5 +1,7 @@
 #pragma once
 
+#include <optional>
+#include <string>
 #include "order.hpp"
 
 namespace matching_engine{
@@ -21,6 +23,12 @@ struct Command{
     Command& operator=(const Command&) = delete;
 
     const CommandType type_;
+
+    // Необязательное на уровне парсера поле (задача 07, п.4): существующие
+    // тесты парсера подают JSON без command_id и ожидают успешный разбор.
+    // Обязательность для изменяющих команд проверяет CommandProcessor, а
+    // не CommandParser.
+    std::optional<std::string> commandId_;
 };
 
 struct AddCommand : Command {

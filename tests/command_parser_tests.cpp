@@ -211,3 +211,58 @@ TEST(CommandParserTest, ParseModifyNegativePrice) {
 
     EXPECT_THROW(parser.parse(json), ParseError);
 }
+
+// ─── command_id (задача 07) ────────────────────────────────────────────────
+// Необязателен на уровне парсера (докстрока над Command::commandId_):
+// существующие тесты выше подают JSON без command_id и по-прежнему успешно
+// разбираются. Здесь — что поле подхватывается, когда оно есть, для любого
+// типа команды, и что неверный тип поля отвергается.
+
+TEST(CommandParserTest, ParseAddWithoutCommandIdLeavesItEmpty){
+    CommandParser parser;
+    auto cmd = parser.parse(fromString(
+        R"({"type":"ADD","id":1,"side":"BUY","price":100,"quantity":10})"
+    ));
+
+    EXPECT_FALSE(cmd->commandId_.has_value());
+}
+
+TEST(CommandParserTest, ParseAddWithCommandIdSetsField){
+    CommandParser parser;
+    auto cmd = parser.parse(fromString(
+        R"({"type":"ADD","id":1,"side":"BUY","price":100,"quantity":10,)"
+        R"("command_id":"abc-123"})"
+    ));
+
+    ASSERT_TRUE(cmd->commandId_.has_value());
+    EXPECT_EQ(*cmd->commandId_, "abc-123");
+}
+
+TEST(CommandParserTest, ParseCancelWithCommandIdSetsField){
+    CommandParser parser;
+    auto cmd = parser.parse(fromString(
+        R"({"type":"CANCEL","id":1,"command_id":"cancel-1"})"
+    ));
+
+    ASSERT_TRUE(cmd->commandId_.has_value());
+    EXPECT_EQ(*cmd->commandId_, "cancel-1");
+}
+
+TEST(CommandParserTest, ParsePrintWithoutCommandIdSucceeds){
+    CommandParser parser;
+    auto cmd = parser.parse(fromString(R"({"type":"PRINT"})"));
+
+    EXPECT_EQ(cmd->type_, CommandType::Print);
+    EXPECT_FALSE(cmd->commandId_.has_value());
+}
+
+TEST(CommandParserTest, CommandIdAsNumberThrows){
+    CommandParser parser;
+    EXPECT_THROW(
+        parser.parse(fromString(
+            R"({"type":"ADD","id":1,"side":"BUY","price":100,"quantity":10,)"
+            R"("command_id":123})"
+        )),
+        ParseError
+    );
+}
