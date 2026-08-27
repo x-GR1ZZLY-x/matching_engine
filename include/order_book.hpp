@@ -13,6 +13,13 @@ namespace matching_engine{
 class OrderBook{
 public:
     void addOrder(std::shared_ptr<Order> order);
+
+    // Восстановление: помещает уже готовую заявку прямо в книгу, минуя
+    // сопоставление (REQ-REC-04). Заявки нужно подавать в порядке возрастания
+    // sequence_number, чтобы очередь внутри ценового уровня совпадала с
+    // приоритетом по времени, который был до перезапуска.
+    void restore(std::shared_ptr<Order> order);
+
     void removeOrder(int id);
     std::shared_ptr<Order> findOrder(int id) const;
     std::shared_ptr<Order> bestBuy() const;

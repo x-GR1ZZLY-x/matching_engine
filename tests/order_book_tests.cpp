@@ -183,3 +183,62 @@ TEST(OrderBookTest, BestBuyTimePriority)
     ASSERT_NE(best, nullptr);
     EXPECT_EQ(best->getId(), 1);
 }
+
+// ─── Восстановление (REQ-REC-04) ──────────────────────────────────────────────
+
+// Заявка, поднятая через restore(), собрана восстанавливающим конструктором:
+// у неё уже есть исходное количество, номер в последовательности и статус.
+static std::shared_ptr<Order> restoredOrder(int id, Side side, int price, int qty,
+    long long sequenceNumber)
+{
+    return std::make_shared<Order>(id, side, price, qty, qty, sequenceNumber,
+        OrderStatus::Open);
+}
+
+TEST(OrderBookTest, RestoreAddsToBothIndexes)
+{
+    OrderBook book;
+    book.restore(restoredOrder(1, Side::Buy, 100, 10, 1));
+
+    auto found = book.findOrder(1);
+    ASSERT_NE(found, nullptr);
+    EXPECT_EQ(found->getPrice(), 100);
+    EXPECT_EQ(book.bestBuy(), found);
+}
+
+TEST(OrderBookTest, RestoreDoesNotMatchCrossingOrders)
+{
+    OrderBook book;
+    // SELL по 100 восстановлена первой
+    book.restore(restoredOrder(1, Side::Sell, 100, 10, 1));
+    // BUY по 150 пересекается по цене с уже стоящей SELL
+    book.restore(restoredOrder(2, Side::Buy, 150, 5, 2));
+
+    // Никакого сопоставления не произошло — обе заявки целы и в книге
+    auto sell = book.findOrder(1);
+    auto buy  = book.findOrder(2);
+    ASSERT_NE(sell, nullptr);
+    ASSERT_NE(buy, nullptr);
+    EXPECT_EQ(sell->getQuantity(), 10);
+    EXPECT_EQ(buy->getQuantity(), 5);
+}
+
+TEST(OrderBookTest, RestorePreservesOrderOfSequenceNumbers)
+{
+    OrderBook book;
+    // Три заявки одной цены, восстановленные в порядке возрастания номера
+    book.restore(restoredOrder(10, Side::Buy, 100, 5, 1));
+    book.restore(restoredOrder(20, Side::Buy, 100, 3, 2));
+    book.restore(restoredOrder(30, Side::Buy, 100, 7, 3));
+
+    auto orders = book.buyOrders();
+    ASSERT_EQ(orders.size(), 3u);
+    EXPECT_EQ(orders[0]->getId(), 10);
+    EXPECT_EQ(orders[1]->getId(), 20);
+    EXPECT_EQ(orders[2]->getId(), 30);
+
+    // bestBuy — первая восстановленная заявка (FIFO)
+    auto best = book.bestBuy();
+    ASSERT_NE(best, nullptr);
+    EXPECT_EQ(best->getId(), 10);
+}
