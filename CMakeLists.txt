@@ -47,6 +47,9 @@ add_library(
     src/database_config.cpp
     src/schema.cpp
     src/sequence_generator.cpp
+    src/order_repository.cpp
+    src/trade_repository.cpp
+    src/command_repository.cpp
 )
 
 target_include_directories(
@@ -87,6 +90,9 @@ add_executable(
     tests/application_tests.cpp
     tests/schema_tests.cpp
     tests/sequence_generator_tests.cpp
+    tests/order_repository_tests.cpp
+    tests/command_repository_tests.cpp
+    tests/trade_repository_tests.cpp
 )
 
 target_include_directories(

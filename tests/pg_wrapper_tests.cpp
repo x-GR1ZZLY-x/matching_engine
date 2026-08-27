@@ -3,6 +3,7 @@
 #include<optional>
 #include<string>
 #include<type_traits>
+#include"exceptions.hpp"
 #include"pg_connection.hpp"
 #include"pg_result.hpp"
 #include"pg_transaction.hpp"
@@ -159,6 +160,42 @@ TEST(PgWrapperIntegrationTest, CommitPersists){
     PgResult result = conn.execute("SELECT id FROM pg_wrapper_commit_test");
     ASSERT_EQ(result.rowCount(), 1);
     EXPECT_EQ(result.getValue(0, 0), "42");
+}
+
+// Критерий 9 задачи 06: перемещение соединения с живой (не разрушенной)
+// PgTransaction должно быть замечено громко, а не оставлять транзакцию
+// висящей на сервере молча. Сценарий воспроизводит ревью дословно.
+TEST(PgWrapperIntegrationTest, MoveConstructorWithActiveTransactionThrows){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    auto& conn = *connOpt;
+
+    PgTransaction tx(conn);
+    EXPECT_THROW(PgConnection moved(std::move(conn)), DatabaseError);
+
+    // Бросок должен произойти до фактического перемещения: conn остаётся
+    // рабочим соединением, и ROLLBACK в деструкторе tx отработает как обычно.
+    PgResult result = conn.execute("SELECT 1");
+    ASSERT_EQ(result.rowCount(), 1);
+    EXPECT_EQ(result.getValue(0, 0), "1");
+}
+
+TEST(PgWrapperIntegrationTest, MoveAssignmentWithActiveTransactionThrows){
+    auto sourceOpt = tryConnect();
+    auto destOpt = tryConnect();
+    if(!sourceOpt || !destOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+
+    PgTransaction tx(*sourceOpt);
+    EXPECT_THROW(*destOpt = std::move(*sourceOpt), DatabaseError);
+
+    // Оба соединения остались рабочими — перемещения не произошло.
+    PgResult result = sourceOpt->execute("SELECT 1");
+    ASSERT_EQ(result.rowCount(), 1);
+    EXPECT_EQ(result.getValue(0, 0), "1");
 }
 
 TEST(PgWrapperIntegrationTest, NullParameterReachesServerAsNull){

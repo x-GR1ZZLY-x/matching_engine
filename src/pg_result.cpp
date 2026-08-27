@@ -1,5 +1,6 @@
 #include"pg_result.hpp"
 #include"exceptions.hpp"
+#include<libpq-fe.h>
 
 namespace matching_engine{
 

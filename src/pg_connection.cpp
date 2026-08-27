@@ -1,6 +1,7 @@
 #include"pg_connection.hpp"
 #include"exceptions.hpp"
 #include"logger.hpp"
+#include<libpq-fe.h>
 
 namespace matching_engine{
 
@@ -33,6 +34,35 @@ PgConnection::PgConnection(const std::string& host, const std::string& port,
     }
 
     PQsetNoticeProcessor(conn_.get(), discardNotice, nullptr);
+}
+
+PgConnection::PgConnection(PgConnection&& other)
+    : conn_(nullptr){
+    if(other.activeTransactionCount_ != 0){
+        throw DatabaseError("Cannot move a PgConnection while a PgTransaction on it "
+            "is still open");
+    }
+    conn_ = std::move(other.conn_);
+}
+
+PgConnection& PgConnection::operator=(PgConnection&& other){
+    if(this == &other){
+        return *this;
+    }
+    if(activeTransactionCount_ != 0 || other.activeTransactionCount_ != 0){
+        throw DatabaseError("Cannot move a PgConnection while a PgTransaction on it "
+            "is still open");
+    }
+    conn_ = std::move(other.conn_);
+    return *this;
+}
+
+PgConnection::~PgConnection(){
+    if(activeTransactionCount_ != 0){
+        Logger::instance().error("PgConnection destroyed while " +
+            std::to_string(activeTransactionCount_) +
+            " PgTransaction(s) on it are still open");
+    }
 }
 
 PgResult PgConnection::execute(const std::string& sql,
