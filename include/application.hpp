@@ -1,7 +1,8 @@
 #pragma once
 #include<string>
 #include"command_parser.hpp"
-#include"matching_engine.hpp"
+#include"command_processor.hpp"
+#include"pg_connection.hpp"
 #include"report_printer.hpp"
 
 namespace matching_engine{
@@ -19,10 +20,13 @@ public:
 
 private:
     CommandParser parser_;
-    MatchingEngine engine_;
+    CommandProcessor processor_;
     ReportPrinter printer_;
 
-    void processCommand(const nlohmann::json& commandJson);
+    // connection передаётся параметром, а не хранится полем Application —
+    // соединение живёт в run() (см. её тело) и передаётся по ссылке на
+    // каждый вызов, как и в репозиториях/CommandProcessor.
+    void processCommand(const nlohmann::json& commandJson, PgConnection& connection);
 };
 
 }

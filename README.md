@@ -150,7 +150,8 @@ std::unordered\_map\<int, std::shared\_ptr\<Order>>   ordersById\_;
     "id": 1,
     "side": "BUY",
     "price": 100,
-    "quantity": 10
+    "quantity": 10,
+    "command_id": "add-example-1"
 }
 \`\`\`
 
@@ -161,13 +162,15 @@ std::unordered\_map\<int, std::shared\_ptr\<Order>>   ordersById\_;
 \| \`side\` | string | \`"BUY"\` или \`"SELL"\` |
 \| \`price\` | int > 0 | Цена заявки |
 \| \`quantity\` | int > 0 | Количество |
+\| \`command_id\` | string | Уникальный идентификатор команды; обязателен для изменяющих команд (ADD, CANCEL, MODIFY) и обеспечивает идемпотентность — повтор с тем же \`command\_id\` не меняет книгу, не создаёт новых сделок и возвращает прошлый результат. \`PRINT\` этого поля не требует |
 
 **### CANCEL — отменить заявку**
 
 \`\`\`json
 {
     "type": "CANCEL",
-    "id": 1
+    "id": 1,
+    "command_id": "cancel-example-1"
 }
 \`\`\`
 
@@ -184,11 +187,11 @@ std::unordered\_map\<int, std::shared\_ptr\<Order>>   ordersById\_;
 \`\`\`json
 {
     "commands": [
-        { "type": "ADD",    "id": 1, "side": "BUY",  "price": 100, "quantity": 10 },
-        { "type": "ADD",    "id": 2, "side": "SELL",  "price": 105, "quantity": 5  },
-        { "type": "ADD",    "id": 3, "side": "SELL",  "price": 99,  "quantity": 7  },
+        { "type": "ADD",    "id": 1, "side": "BUY",  "price": 100, "quantity": 10, "command_id": "full-example-add-1" },
+        { "type": "ADD",    "id": 2, "side": "SELL",  "price": 105, "quantity": 5, "command_id": "full-example-add-2" },
+        { "type": "ADD",    "id": 3, "side": "SELL",  "price": 99,  "quantity": 7, "command_id": "full-example-add-3" },
         { "type": "PRINT" },
-        { "type": "CANCEL", "id": 2 },
+        { "type": "CANCEL", "id": 2, "command_id": "full-example-cancel-1" },
         { "type": "PRINT" }
     ]
 }
@@ -231,8 +234,8 @@ JSON передаётся одним аргументом командной с�
 \`\`\`bash
 ./build/matching\_engine '{
     "commands": [
-        { "type": "ADD",  "id": 1, "side": "BUY",  "price": 100, "quantity": 10 },
-        { "type": "ADD",  "id": 2, "side": "SELL",  "price": 99,  "quantity": 7  },
+        { "type": "ADD",  "id": 1, "side": "BUY",  "price": 100, "quantity": 10, "command_id": "run-example-add-1" },
+        { "type": "ADD",  "id": 2, "side": "SELL",  "price": 99,  "quantity": 7, "command_id": "run-example-add-2" },
         { "type": "PRINT" }
     ]
 }'
@@ -271,8 +274,8 @@ ctest --test-dir build
 \`\`\`bash
 ./build/matching\_engine '{
     "commands": [
-        { "type": "ADD",  "id": 1, "side": "BUY",  "price": 100, "quantity": 10 },
-        { "type": "ADD",  "id": 2, "side": "SELL",  "price": 105, "quantity": 5  },
+        { "type": "ADD",  "id": 1, "side": "BUY",  "price": 100, "quantity": 10, "command_id": "no-trade-add-1" },
+        { "type": "ADD",  "id": 2, "side": "SELL",  "price": 105, "quantity": 5, "command_id": "no-trade-add-2" },
         { "type": "PRINT" }
     ]
 }'
@@ -297,15 +300,15 @@ BUY
 \`\`\`bash
 ./build/matching\_engine '{
     "commands": [
-        { "type": "ADD",  "id": 1, "side": "BUY",  "price": 100, "quantity": 10 },
-        { "type": "ADD",  "id": 2, "side": "SELL",  "price": 100, "quantity": 10 },
+        { "type": "ADD",  "id": 1, "side": "BUY",  "price": 100, "quantity": 10, "command_id": "full-fill-add-1" },
+        { "type": "ADD",  "id": 2, "side": "SELL",  "price": 100, "quantity": 10, "command_id": "full-fill-add-2" },
         { "type": "PRINT" }
     ]
 }'
 \`\`\`
 
 \`\`\`
-TRADE buy=2 sell=1 price=100 quantity=10
+TRADE buy=1 sell=2 price=100 quantity=10
 
 ORDER BOOK
 
@@ -323,8 +326,8 @@ BUY на 10, SELL на 4 — BUY остаётся в книге с остатк�
 \`\`\`bash
 ./build/matching\_engine '{
     "commands": [
-        { "type": "ADD",  "id": 1, "side": "BUY",  "price": 100, "quantity": 10 },
-        { "type": "ADD",  "id": 2, "side": "SELL",  "price": 100, "quantity": 4  },
+        { "type": "ADD",  "id": 1, "side": "BUY",  "price": 100, "quantity": 10, "command_id": "partial-fill-add-1" },
+        { "type": "ADD",  "id": 2, "side": "SELL",  "price": 100, "quantity": 4, "command_id": "partial-fill-add-2" },
         { "type": "PRINT" }
     ]
 }'
@@ -350,10 +353,10 @@ BUY
 \`\`\`bash
 ./build/matching\_engine '{
     "commands": [
-        { "type": "ADD",  "id": 1, "side": "SELL",  "price": 101, "quantity": 5 },
-        { "type": "ADD",  "id": 2, "side": "SELL",  "price": 99,  "quantity": 3 },
-        { "type": "ADD",  "id": 3, "side": "SELL",  "price": 100, "quantity": 4 },
-        { "type": "ADD",  "id": 4, "side": "BUY",   "price": 100, "quantity": 7 },
+        { "type": "ADD",  "id": 1, "side": "SELL",  "price": 101, "quantity": 5, "command_id": "priority-add-1" },
+        { "type": "ADD",  "id": 2, "side": "SELL",  "price": 99,  "quantity": 3, "command_id": "priority-add-2" },
+        { "type": "ADD",  "id": 3, "side": "SELL",  "price": 100, "quantity": 4, "command_id": "priority-add-3" },
+        { "type": "ADD",  "id": 4, "side": "BUY",   "price": 100, "quantity": 7, "command_id": "priority-add-4" },
         { "type": "PRINT" }
     ]
 }'
@@ -378,9 +381,9 @@ BUY
 \`\`\`bash
 ./build/matching\_engine '{
     "commands": [
-        { "type": "ADD",    "id": 1, "side": "SELL",  "price": 100, "quantity": 10 },
-        { "type": "CANCEL", "id": 1 },
-        { "type": "ADD",    "id": 2, "side": "BUY",   "price": 100, "quantity": 10 },
+        { "type": "ADD",    "id": 1, "side": "SELL",  "price": 100, "quantity": 10, "command_id": "cancel-demo-add-1" },
+        { "type": "CANCEL", "id": 1, "command_id": "cancel-demo-cancel-1" },
+        { "type": "ADD",    "id": 2, "side": "BUY",   "price": 100, "quantity": 10, "command_id": "cancel-demo-add-2" },
         { "type": "PRINT" }
     ]
 }'
@@ -427,8 +430,8 @@ BUY
 \`\`\`bash
 ./build/matching\_engine '{
     "commands": [
-        { "type": "ADD",    "id": 1, "side": "BUY",  "price": 100, "quantity": 10 },
-        { "type": "CANCEL", "id": 99 },
+        { "type": "ADD",    "id": 1, "side": "BUY",  "price": 100, "quantity": 10, "command_id": "error-demo-add-1" },
+        { "type": "CANCEL", "id": 99, "command_id": "error-demo-cancel-1" },
         { "type": "PRINT" }
     ]
 }'

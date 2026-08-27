@@ -50,6 +50,9 @@ add_library(
     src/order_repository.cpp
     src/trade_repository.cpp
     src/command_repository.cpp
+    src/command_cache.cpp
+    src/persistence_service.cpp
+    src/command_processor.cpp
 )
 
 target_include_directories(
@@ -93,6 +96,7 @@ add_executable(
     tests/order_repository_tests.cpp
     tests/command_repository_tests.cpp
     tests/trade_repository_tests.cpp
+    tests/command_cache_tests.cpp
 )
 
 target_include_directories(
