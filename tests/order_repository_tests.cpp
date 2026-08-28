@@ -209,3 +209,29 @@ TEST(OrderRepositoryTest, SaveRejectsActiveMarketOrder){
     EXPECT_THROW(repo.save(conn, makeChange(900000502, Side::Buy, std::nullopt, 10, 5,
         OrderStatus::PartiallyFilled, 900000702)), MatchingEngineError);
 }
+
+// Задача 08, критерий 4: maxSequenceNumber() обязан видеть исполненную
+// заявку с номером выше, чем у любой активной, — loadActive() её не вернёт
+// (фильтр по статусу), поэтому взять максимум только по её результату было
+// бы ровно той ошибкой, о которой предупреждает критерий.
+TEST(OrderRepositoryTest, MaxSequenceNumberSeesFilledOrderAboveAnyActiveOne){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    auto& conn = *connOpt;
+    PgTransaction tx(conn);
+
+    OrderRepository repo;
+    repo.save(conn, makeChange(900000901, Side::Buy, 100, 10, 10,
+        OrderStatus::Open, 900000910));
+    repo.save(conn, makeChange(900000902, Side::Sell, 100, 10, 0,
+        OrderStatus::Filled, 900000999));
+
+    // Не EXPECT_EQ: тест проверяет, что максимум виден по всей таблице (а не
+    // только по активным заявкам), а не что в рабочей базе больше нет других
+    // строк с большим номером. Если бы maxSequenceNumber() ошибочно смотрел
+    // только на активные заявки, вернулось бы меньшее значение и это всё
+    // равно упало бы.
+    EXPECT_GE(repo.maxSequenceNumber(conn), 900000999);
+}

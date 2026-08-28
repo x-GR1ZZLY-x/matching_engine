@@ -6,6 +6,7 @@
 #include"exceptions.hpp"
 #include"pg_connection.hpp"
 #include"database_config.hpp"
+#include"recovery_service.hpp"
 #include"schema.hpp"
 
 namespace matching_engine{
@@ -121,6 +122,19 @@ int Application::run(int argc, char** argv){
         Logger::instance().error(describeSchemaFailure(kSchemaDir));
         Logger::instance().debug(std::string("Schema error: ") + e.what());
         printer_.printError(describeSchemaFailure(kSchemaDir));
+        return 1;
+    }
+
+    // Восстановление обязано завершиться прежде первой обрабатываемой
+    // команды (docs/tasks/task-08.md): книга, счётчик номеров и кеш
+    // идемпотентности должны быть в порядке, унаследованном от прошлых
+    // запусков, до того как движок увидит новый JSON-пакет.
+    try{
+        recoverState(*connection, processor_);
+    } catch(const MatchingEngineError& e){
+        Logger::instance().error(std::string("Recovery error: ") + e.what());
+        printer_.printError(std::string("Failed to recover state from the database: ") +
+            e.what());
         return 1;
     }
 

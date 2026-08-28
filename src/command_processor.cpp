@@ -1,6 +1,7 @@
 #include"command_processor.hpp"
 #include<nlohmann/json.hpp>
 #include"exceptions.hpp"
+#include"logger.hpp"
 
 namespace matching_engine{
 
@@ -50,13 +51,36 @@ nlohmann::json tradeToJson(const Trade& trade){
     return j;
 }
 
+// Обратная пара к orderChangeToJson/tradeToJson — тот же набор ключей,
+// прочитанный назад. Живёт рядом с прямым направлением в одном файле:
+// формат processed_commands.result описан здесь и только здесь (задача 08,
+// "Доменные правила", п.2), разъехавшиеся сериализация и разбор молча
+// сломали бы прогрев кеша после рестарта.
+OrderChange orderChangeFromJson(const nlohmann::json& j){
+    OrderChange change;
+    change.id = j.at("id").get<int>();
+    change.side = Order::sideFromString(j.at("side").get<std::string>());
+    change.price = j.at("price").is_null()
+        ? std::nullopt
+        : std::optional<int>(j.at("price").get<int>());
+    change.initialQuantity = j.at("initial_quantity").get<int>();
+    change.remainingQuantity = j.at("remaining_quantity").get<int>();
+    change.status = Order::statusFromString(j.at("status").get<std::string>());
+    change.sequenceNumber = j.at("sequence_number").get<long long>();
+    return change;
+}
+
+Trade tradeFromJson(const nlohmann::json& j){
+    return Trade(j.at("buy_order_id").get<int>(), j.at("sell_order_id").get<int>(),
+        j.at("price").get<int>(), j.at("quantity").get<int>());
+}
+
+}
+
 // Сериализация в processed_commands.result (JSONB), обратимая по
 // построению: каждое поле Trade/OrderChange отражено один в один, включая
-// порядок orderChanges в массиве. Задача 08 сможет разобрать это обратно в
-// ExecutionResult при прогреве кеша при старте; сам разбор обратно — уже
-// задача 08 (см. границы задачи 07), здесь важно только не потерять
-// информацию при записи.
-std::string serializeResult(const ExecutionResult& result){
+// порядок orderChanges в массиве.
+std::string CommandProcessor::serializeResult(const ExecutionResult& result){
     nlohmann::json j;
 
     j["trades"] = nlohmann::json::array();
@@ -72,6 +96,27 @@ std::string serializeResult(const ExecutionResult& result){
     return j.dump();
 }
 
+// Разбор JSON, испорченный библиотекой (не найден ключ, не тот тип) —
+// nlohmann::json::exception, не входящий в иерархию MatchingEngineError;
+// без перехвата такое исключение долетело бы до std::terminate тем же
+// путём, от которого предостерегает критерий 5 задачи 07. side/status,
+// нарушающие свой формат, дают OrderError — он уже MatchingEngineError,
+// оборачивать незачем.
+ExecutionResult CommandProcessor::parseResult(const std::string& json){
+    try{
+        nlohmann::json j = nlohmann::json::parse(json);
+
+        ExecutionResult result;
+        for(const auto& tradeJson : j.at("trades")){
+            result.trades.push_back(tradeFromJson(tradeJson));
+        }
+        for(const auto& changeJson : j.at("order_changes")){
+            result.orderChanges.push_back(orderChangeFromJson(changeJson));
+        }
+        return result;
+    } catch(const nlohmann::json::exception& e){
+        throw DatabaseError(std::string("Corrupted processed_commands.result JSON: ") + e.what());
+    }
 }
 
 ExecutionResult CommandProcessor::process(const Command& command, PgConnection& connection){
@@ -99,6 +144,31 @@ ExecutionResult CommandProcessor::process(const Command& command, PgConnection& 
 
 const OrderBook& CommandProcessor::orderBook() const noexcept{
     return engine_.orderBook();
+}
+
+void CommandProcessor::restoreOrder(std::shared_ptr<Order> order){
+    engine_.restore(std::move(order));
+}
+
+void CommandProcessor::warmCache(const std::string& commandId,
+    const std::optional<std::string>& resultJson){
+    if(!resultJson){
+        // Колонка nullable — NULL сюда попадает не от нормального процесса
+        // задачи 08, а от внешнего вмешательства (ручная правка, сторонний
+        // инструмент). Молча подставлять пустой результат не запрещено, но
+        // след в логе обязателен: иначе повтор этой команды после рестарта
+        // тихо ответит "сделок нет" вместо прошлого результата.
+        Logger::instance().warning("processed_commands.result is NULL for command '" +
+            commandId + "', warming cache with an empty result");
+        cache_.put(commandId, ExecutionResult{});
+        return;
+    }
+
+    try{
+        cache_.put(commandId, parseResult(*resultJson));
+    } catch(const MatchingEngineError& e){
+        throw DatabaseError("Corrupted result for command '" + commandId + "': " + e.what());
+    }
 }
 
 }

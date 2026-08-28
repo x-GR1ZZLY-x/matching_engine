@@ -120,4 +120,20 @@ std::vector<std::shared_ptr<Order>> OrderRepository::loadActive(PgConnection& co
     return orders;
 }
 
+long long OrderRepository::maxSequenceNumber(PgConnection& connection){
+    // Без WHERE — по всей таблице: loadActive() фильтрует по статусу и
+    // поэтому не годится для этого запроса (см. комментарий в заголовке).
+    PgResult result = connection.execute("SELECT MAX(sequence_number) FROM orders");
+
+    // MAX() над пустой таблицей возвращает одну строку с NULL — штатный
+    // случай первого запуска, счётчик тогда остаётся на начальном значении.
+    // SELECT MAX(...) без GROUP BY всегда возвращает ровно одну строку,
+    // поэтому проверять result.rowCount() == 0 незачем.
+    if(result.isNull(0, 0)){
+        return 0;
+    }
+
+    return parseLongLong(result.getValue(0, 0), "orders.sequence_number (MAX)");
+}
+
 }
