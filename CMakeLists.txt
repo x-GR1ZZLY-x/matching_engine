@@ -53,6 +53,7 @@ add_library(
     src/command_cache.cpp
     src/persistence_service.cpp
     src/command_processor.cpp
+    src/recovery_service.cpp
 )
 
 target_include_directories(
@@ -97,6 +98,7 @@ add_executable(
     tests/command_repository_tests.cpp
     tests/trade_repository_tests.cpp
     tests/command_cache_tests.cpp
+    tests/command_processor_tests.cpp
 )
 
 target_include_directories(

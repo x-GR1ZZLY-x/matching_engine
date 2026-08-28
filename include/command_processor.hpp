@@ -1,5 +1,8 @@
 #pragma once
 
+#include<memory>
+#include<optional>
+#include<string>
 #include"command.hpp"
 #include"command_cache.hpp"
 #include"execution_result.hpp"
@@ -34,6 +37,26 @@ public:
     ExecutionResult process(const Command& command, PgConnection& connection);
 
     const OrderBook& orderBook() const noexcept;
+
+    // Восстановление при старте (задача 08, RecoveryService, см.
+    // src/recovery_service.cpp): узкие методы вместо доступа к engine_/cache_
+    // целиком. restoreOrder кладёт уже готовую заявку в книгу мимо
+    // сопоставления (MatchingEngine::restore -> OrderBook::restore, задача
+    // 05) — сделок при этом не возникает, даже если в книге уже есть
+    // встречная заявка с пересекающейся ценой. warmCache заполняет кеш
+    // идемпотентности одной записью processed_commands; resultJson == nullopt
+    // (NULL-колонка) даёт пустой ExecutionResult, а не ошибку.
+    void restoreOrder(std::shared_ptr<Order> order);
+    void warmCache(const std::string& commandId, const std::optional<std::string>& resultJson);
+
+    // Сериализация ExecutionResult <-> processed_commands.result (JSONB) —
+    // симметричная пара в одном месте: process() сериализует перед
+    // сохранением, warmCache() разбирает обратно при прогреве. Публичны и
+    // статичны ради round-trip теста (docs/tasks/task-08.md, "Условия
+    // работы") — иного смысла, кроме кодека формата, не несут и полей
+    // класса не читают.
+    static std::string serializeResult(const ExecutionResult& result);
+    static ExecutionResult parseResult(const std::string& json);
 
 private:
     CommandCache cache_;

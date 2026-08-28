@@ -39,6 +39,15 @@ public:
     // в SQL, а не через Order::isFilled(): та смотрит только на остаток и
     // для отменённой заявки с нулевым остатком вернула бы true.
     std::vector<std::shared_ptr<Order>> loadActive(PgConnection& connection);
+
+    // Максимум sequence_number по ВСЕЙ таблице orders, а не только по
+    // активным заявкам, которые возвращает loadActive() (задача 08,
+    // критерий 4). Нужен для восстановления SequenceGenerator при старте:
+    // если взять максимум только по активным, исполненная или отменённая
+    // заявка с бо́льшим номером останется невидимой, и первая же вставка
+    // после старта столкнётся с UNIQUE на orders.sequence_number. Пустая
+    // таблица — штатный случай первого запуска, возвращает 0.
+    long long maxSequenceNumber(PgConnection& connection);
 };
 
 }
