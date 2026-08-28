@@ -99,6 +99,7 @@ add_executable(
     tests/trade_repository_tests.cpp
     tests/command_cache_tests.cpp
     tests/command_processor_tests.cpp
+    tests/integration_tests.cpp
 )
 
 target_include_directories(
