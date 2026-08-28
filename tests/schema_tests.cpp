@@ -1,5 +1,4 @@
 #include<gtest/gtest.h>
-#include<cstdlib>
 #include<filesystem>
 #include<fstream>
 #include<optional>
@@ -8,39 +7,13 @@
 #include"pg_result.hpp"
 #include"schema.hpp"
 #include"exceptions.hpp"
+#include"test_database.hpp"
 
 using namespace matching_engine;
+using matching_engine::test::g_lastConnectFailure;
+using matching_engine::test::tryConnect;
 
 namespace {
-
-std::string envOrDefault(const char* name, const std::string& fallback){
-    const char* value = std::getenv(name);
-    return value ? std::string(value) : fallback;
-}
-
-std::string g_lastConnectFailure = "переменная MATCHING_ENGINE_DB_PASSWORD не задана";
-
-// Пытается подключиться к тестовой базе. Возвращает nullopt, если БД
-// недоступна или пароль не задан — тогда тест пропускается через GTEST_SKIP.
-std::optional<PgConnection> tryConnect(){
-    const char* password = std::getenv("MATCHING_ENGINE_DB_PASSWORD");
-    if(!password || password[0] == '\0'){
-        g_lastConnectFailure = "переменная MATCHING_ENGINE_DB_PASSWORD не задана";
-        return std::nullopt;
-    }
-
-    std::string host = envOrDefault("MATCHING_ENGINE_DB_HOST", "127.0.0.1");
-    std::string port = envOrDefault("MATCHING_ENGINE_DB_PORT", "5432");
-    std::string dbname = envOrDefault("MATCHING_ENGINE_DB_NAME", "matching_engine");
-    std::string user = envOrDefault("MATCHING_ENGINE_DB_USER", "engine");
-
-    try{
-        return PgConnection(host, port, dbname, user, password);
-    } catch(const std::exception& ex){
-        g_lastConnectFailure = ex.what();
-        return std::nullopt;
-    }
-}
 
 // RAII-каталог со схемой: создаёт временную директорию с *.sql файлами и
 // удаляет её при разрушении.
