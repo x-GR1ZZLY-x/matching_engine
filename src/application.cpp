@@ -1,4 +1,6 @@
 #include<nlohmann/json.hpp>
+#include<chrono>
+#include<fstream>
 #include<iostream>
 #include<optional>
 #include"application.hpp"
@@ -16,6 +18,7 @@ constexpr const char* kDefaultConfigPath = "config/database.json";
 constexpr const char* kSchemaDir = "database";
 constexpr const char* kUsage =
     "Usage: matching_engine [--config <path>] '<json>'\n"
+    "       matching_engine [--config <path>] --replay <file.jsonl>\n"
     "  Commands that change state (ADD, CANCEL, MODIFY) must include a "
     "unique \"command_id\" field; PRINT does not need one.\n";
 
@@ -42,9 +45,12 @@ std::string describeSchemaFailure(const std::string& schemaDir){
 }
 
 bool Application::parseArgs(int argc, char** argv, std::string& configPath,
-    std::string& jsonArg, std::string& errorMessage){
+    std::string& jsonArg, std::string& replayPath, std::string& errorMessage){
     configPath = kDefaultConfigPath;
+    jsonArg.clear();
+    replayPath.clear();
     bool hasJsonArg = false;
+    bool hasReplay = false;
     errorMessage.clear();
 
     for(int i = 1; i < argc; ++i){
@@ -55,6 +61,13 @@ bool Application::parseArgs(int argc, char** argv, std::string& configPath,
                 return false;
             }
             configPath = argv[++i];
+        } else if(arg == "--replay"){
+            if(i + 1 >= argc){
+                errorMessage = "Option --replay requires a path argument";
+                return false;
+            }
+            replayPath = argv[++i];
+            hasReplay = true;
         } else if(arg.rfind("--", 0) == 0){
             errorMessage = "Unknown option: " + arg;
             return false;
@@ -67,7 +80,12 @@ bool Application::parseArgs(int argc, char** argv, std::string& configPath,
         }
     }
 
-    if(!hasJsonArg){
+    if(hasReplay && hasJsonArg){
+        errorMessage = "Cannot use --replay together with a JSON argument";
+        return false;
+    }
+
+    if(!hasReplay && !hasJsonArg){
         errorMessage = kUsage;
         return false;
     }
@@ -80,8 +98,9 @@ int Application::run(int argc, char** argv){
 
     std::string configPath;
     std::string jsonArg;
+    std::string replayPath;
     std::string parseError;
-    if(!parseArgs(argc, argv, configPath, jsonArg, parseError)){
+    if(!parseArgs(argc, argv, configPath, jsonArg, replayPath, parseError)){
         if(parseError == kUsage){
             std::cerr << parseError;
         } else {
@@ -138,6 +157,29 @@ int Application::run(int argc, char** argv){
         return 1;
     }
 
+    // Режим воспроизведения нагрузки идёт по отдельной ветке, но через ту
+    // же цепочку старта выше (конфигурация -> соединение -> схема ->
+    // recoverState) — критерий 7 задачи 10. PersistenceError фатальна и в
+    // этом режиме (docs/plan.md, "Обработка ошибок: два разных класса"),
+    // поэтому она перехватывается здесь так же, как ниже для обычного
+    // режима, а не поглощается внутри runReplay.
+    if(!replayPath.empty()){
+        bool replayOk = false;
+        try{
+            replayOk = runReplay(replayPath, *connection);
+        } catch(const PersistenceError& e){
+            Logger::instance().error(std::string("Persistence error: ") + e.what());
+            printer_.printError(std::string("Failed to save results to the database, "
+                "aborting: ") + e.what());
+            return 1;
+        }
+        if(!replayOk){
+            return 1;
+        }
+        Logger::instance().info("Application finished");
+        return 0;
+    }
+
     nlohmann::json root;
     try{
         root = nlohmann::json::parse(jsonArg);
@@ -169,7 +211,7 @@ int Application::run(int argc, char** argv){
     // main() и обернулось бы неперехваченным std::terminate.
     try{
         for(const auto& commandJson : root["commands"]){
-            processCommand(commandJson, *connection);
+            processCommand(commandJson, *connection, /*printTrades=*/true);
         }
     } catch(const PersistenceError& e){
         Logger::instance().error(std::string("Persistence error: ") + e.what());
@@ -182,7 +224,8 @@ int Application::run(int argc, char** argv){
     return 0;
 }
 
-void Application::processCommand(const nlohmann::json& commandJson, PgConnection& connection){
+Application::CommandOutcome Application::processCommand(const nlohmann::json& commandJson,
+    PgConnection& connection, bool printTrades){
     std::unique_ptr<Command> command;
 
     try{
@@ -190,33 +233,133 @@ void Application::processCommand(const nlohmann::json& commandJson, PgConnection
     } catch(const MatchingEngineError& e){
         Logger::instance().error(std::string("Parse error: ") + e.what());
         printer_.printError(e.what());
-        return;
+        return CommandOutcome{CommandOutcome::Status::Failed, 0};
     }
 
     if(command->type_ == CommandType::Print){
         printer_.printOrderBook(processor_.orderBook());
-        return;
+        return CommandOutcome{CommandOutcome::Status::Printed, 0};
     }
 
     ExecutionResult result;
+    bool servedFromCache = false;
     try{
-        result = processor_.process(*command, connection);
+        result = processor_.process(*command, connection, &servedFromCache);
     } catch(const PersistenceError&){
         // PersistenceError наследует MatchingEngineError (конвенция
         // проекта) — обязан быть перехвачен и проброшен раньше
         // catch(const MatchingEngineError&) ниже, иначе тот перехватит его
         // как обычную командную ошибку и проглотит (docs/tasks/task-07.md,
-        // п.5). Дальше исключение ловит цикл в run().
+        // п.5). Дальше исключение ловит цикл в run() (обычный режим) либо
+        // runReplay (режим воспроизведения) — обоим он должен быть фатален.
         throw;
     } catch(const MatchingEngineError& e){
         Logger::instance().error(std::string("Engine error: ") + e.what());
         printer_.printError(e.what());
-        return;
+        return CommandOutcome{CommandOutcome::Status::Failed, 0};
     }
 
-    for(const auto& trade : result.trades){
-        printer_.printTrade(trade);
+    // В обычном режиме (printTrades == true) каждая сделка печатается сразу,
+    // как и раньше, — независимо от того, обслужена ли команда из кеша
+    // идемпотентности (поведение обычного режима задачей 10 менять
+    // запрещено). В режиме --replay печать отдельных строк TRADE намеренно
+    // отключена (docs/tasks/task-10.md): при 100 000+ командах это были бы
+    // десятки тысяч строк в stdout, а задача 11 профилирует именно этот
+    // режим — вывод в терминал исказил бы замер работы движка и БД. Число
+    // сделок вместо этого уходит в итоговую сводку.
+    if(printTrades){
+        for(const auto& trade : result.trades){
+            printer_.printTrade(trade);
+        }
     }
+
+    if(servedFromCache){
+        // Ревью задачи 10, правка 1: команда пришла из кеша идемпотентности
+        // и в этом вызове ничего не записала в БД — trades == 0, чтобы
+        // runReplay не считал сделки повтора второй раз.
+        return CommandOutcome{CommandOutcome::Status::Duplicate, 0};
+    }
+    return CommandOutcome{CommandOutcome::Status::Applied,
+        static_cast<int>(result.trades.size())};
+}
+
+bool Application::runReplay(const std::string& path, PgConnection& connection){
+    std::ifstream file(path);
+    if(!file.is_open()){
+        Logger::instance().error("Cannot open replay file: " + path);
+        printer_.printError("Cannot open replay file: " + path);
+        return false;
+    }
+
+    const auto start = std::chrono::steady_clock::now();
+    // Счётчики отражают три разных исхода команды, а не долю строк файла
+    // (ревью задачи 10, правка 1). Обещание перед критерием 7: processed ==
+    // число строк, реально добавленных в processed_commands в этом прогоне;
+    // trades == число строк, добавленных в trades. duplicates и skipped в
+    // это равенство не входят — строки PRINT тоже не входят ни в один
+    // счётчик. Сумма счётчиков поэтому не обязана равняться числу строк
+    // файла.
+    long long processedCount = 0;
+    long long tradeCount = 0;
+    long long duplicateCount = 0;
+    long long skippedCount = 0;
+
+    // Потоковое чтение построчно (REQ-PERF-02, критерий 4 задачи 10): файл
+    // не грузится в память целиком, в любой момент в памяти — одна строка.
+    std::string line;
+    while(std::getline(file, line)){
+        if(line.find_first_not_of(" \t\r\n") == std::string::npos){
+            continue; // Пустые и пробельные строки пропускаются молча.
+        }
+
+        nlohmann::json commandJson;
+        try{
+            commandJson = nlohmann::json::parse(line);
+        } catch(const nlohmann::json::parse_error& e){
+            Logger::instance().error(std::string("Replay: invalid JSON line: ") + e.what());
+            printer_.printError(std::string("Invalid JSON line: ") + e.what());
+            ++skippedCount;
+            continue;
+        }
+
+        // PersistenceError не перехватывается здесь — она должна дойти до
+        // run(), который завершает процесс (см. критерий 4 задания и
+        // docs/plan.md, "Обработка ошибок: два разных класса").
+        const CommandOutcome outcome = processCommand(commandJson, connection,
+            /*printTrades=*/false);
+        switch(outcome.status){
+            case CommandOutcome::Status::Applied:
+                ++processedCount;
+                tradeCount += outcome.trades;
+                break;
+            case CommandOutcome::Status::Duplicate:
+                ++duplicateCount;
+                break;
+            case CommandOutcome::Status::Printed:
+                break;
+            case CommandOutcome::Status::Failed:
+                ++skippedCount;
+                break;
+        }
+    }
+
+    // getline возвращает false и по достижении конца файла (eof, прогон
+    // успешен), и при сбое чтения потока (failbit/badbit без eof — ревью
+    // задачи 10, правка 4: путь указывает на каталог, поток открывается,
+    // но каждый getline проваливается). Пустой файл — законный вход и не
+    // должен приниматься за ошибку, поэтому проверяем именно badbit, а не
+    // общий !file.
+    if(file.bad()){
+        Logger::instance().error("Replay: read error on file: " + path);
+        printer_.printError("Failed to read replay file: " + path);
+        return false;
+    }
+
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start);
+
+    printer_.printReplaySummary(processedCount, tradeCount, duplicateCount, skippedCount, elapsed);
+    return true;
 }
 
 }

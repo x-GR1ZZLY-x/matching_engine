@@ -118,7 +118,8 @@ ExecutionResult CommandProcessor::parseResult(const std::string& json){
     }
 }
 
-ExecutionResult CommandProcessor::process(const Command& command, PgConnection& connection){
+ExecutionResult CommandProcessor::process(const Command& command, PgConnection& connection,
+    bool* servedFromCache){
     if(!command.commandId_ || command.commandId_->empty()){
         throw ParseError("command_id is required for a state-changing command (type " +
             commandTypeToString(command.type_) + ")");
@@ -128,6 +129,9 @@ ExecutionResult CommandProcessor::process(const Command& command, PgConnection& 
     if(const ExecutionResult* cached = cache_.find(commandId)){
         // REQ-IDEM-02/03: команда уже обработана — возвращаем прошлый
         // результат, книгу не трогаем и в БД ничего не читаем и не пишем.
+        if(servedFromCache){
+            *servedFromCache = true;
+        }
         return *cached;
     }
 
@@ -138,6 +142,9 @@ ExecutionResult CommandProcessor::process(const Command& command, PgConnection& 
     persistence_.save(connection, result, record);
 
     cache_.put(commandId, result);
+    if(servedFromCache){
+        *servedFromCache = false;
+    }
     return result;
 }
 

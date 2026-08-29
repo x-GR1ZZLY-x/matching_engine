@@ -1,8 +1,11 @@
 #include<gtest/gtest.h>
+#include<filesystem>
+#include<fstream>
 #include<memory>
 #include<optional>
 #include<string>
 #include<vector>
+#include"application.hpp"
 #include"command.hpp"
 #include"command_processor.hpp"
 #include"execution_result.hpp"
@@ -475,6 +478,79 @@ TEST(IntegrationTest, ModifyResetsTimePriorityAcrossRestart){
     auto orderTenAfter = processor2.orderBook().findOrder(kTenId);
     ASSERT_NE(orderTenAfter, nullptr);
     EXPECT_EQ(orderTenAfter->getQuantity(), 3);
+
+    cleanupAllTables(conn);
+}
+
+// Ревью задачи 10, правка 3: критерии 3/4/6/7 (Application::run --replay
+// печатает сводку, некорректная строка не прерывает прогон, режим идёт
+// через тот же путь сохранения) до сих пор проверялись только вручную.
+// Единственный интеграционный тест на весь Application::run --replay:
+// файл из трёх строк (валидная ADD, битый JSON, валидная ADD) обязан дать
+// код возврата 0 и ровно две строки в processed_commands.
+TEST(IntegrationTest, ApplicationRunReplaySkipsBadLineAndPersistsValidOnes){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    auto& conn = *connOpt;
+    cleanupAllTables(conn);
+
+    constexpr int kFirstId = 901700001;
+    constexpr int kSecondId = 901700002;
+
+    const std::filesystem::path replayPath = std::filesystem::temp_directory_path() /
+        "matching_engine_replay_app_test.jsonl";
+    {
+        std::ofstream out(replayPath);
+        out << "{\"type\":\"ADD\",\"id\":" << kFirstId
+            << ",\"side\":\"BUY\",\"price\":100,\"quantity\":5,"
+               "\"command_id\":\"replay-app-1\"}\n";
+        out << "{this is not valid json\n";
+        out << "{\"type\":\"ADD\",\"id\":" << kSecondId
+            << ",\"side\":\"SELL\",\"price\":200,\"quantity\":3,"
+               "\"command_id\":\"replay-app-2\"}\n";
+    }
+
+    // Application::run применяет схему из ОТНОСИТЕЛЬНОГО пути "database"
+    // (src/application.cpp, kSchemaDir), а ctest запускает тесты с рабочим
+    // каталогом build/ — тот же приём, что SchemaTest применяет через
+    // MATCHING_ENGINE_SOURCE_DIR, только здесь нужно временно сменить
+    // текущий каталог процесса, а не собрать абсолютный путь строкой (сам
+    // Application::run пути не параметризует). Возврат к прежнему каталогу
+    // обязан произойти и на пути исключения, иначе следующий тест в этом
+    // процессе побежит из чужого каталога.
+    const std::filesystem::path previousCwd = std::filesystem::current_path();
+    std::filesystem::current_path(MATCHING_ENGINE_SOURCE_DIR);
+
+    int exitCode = 1;
+    try{
+        const std::string configPath = matching_engine::test::configPath();
+        const std::string replayPathStr = replayPath.string();
+        std::vector<char*> argv{
+            const_cast<char*>("matching_engine"),
+            const_cast<char*>("--config"),
+            const_cast<char*>(configPath.c_str()),
+            const_cast<char*>("--replay"),
+            const_cast<char*>(replayPathStr.c_str())};
+
+        Application app;
+        exitCode = app.run(static_cast<int>(argv.size()), argv.data());
+    } catch(...){
+        std::filesystem::current_path(previousCwd);
+        std::filesystem::remove(replayPath);
+        throw;
+    }
+    std::filesystem::current_path(previousCwd);
+    std::filesystem::remove(replayPath);
+
+    EXPECT_EQ(exitCode, 0);
+
+    PgResult count = conn.execute(
+        "SELECT COUNT(*) FROM processed_commands WHERE command_id = $1 OR command_id = $2",
+        {std::optional<std::string>("replay-app-1"), std::optional<std::string>("replay-app-2")});
+    ASSERT_EQ(count.rowCount(), 1);
+    EXPECT_EQ(count.getValue(0, 0), "2");
 
     cleanupAllTables(conn);
 }

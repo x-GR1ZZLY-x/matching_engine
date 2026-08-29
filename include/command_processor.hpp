@@ -34,7 +34,16 @@ public:
     // кеше -> вернуть прошлый результат, ничего не выполняя и не читая БД;
     // иначе -> сопоставление в памяти, затем одна транзакция БД, затем
     // запись результата в кеш (REQ-IDEM-01..06, REQ-TX-01/02).
-    ExecutionResult process(const Command& command, PgConnection& connection);
+    //
+    // servedFromCache, если не nullptr, выставляется в true на ветке
+    // раннего возврата из кеша (команда не записывалась в БД в этом
+    // вызове) и в false, когда результат получен свежей записью. Нужен
+    // вызывающей стороне (Application::runReplay, задача 10), чтобы
+    // отличать реально сохранённые команды от повторов идемпотентности —
+    // по числу сделок это неразличимо. Параметр по умолчанию сохраняет
+    // существующие вызовы без изменений.
+    ExecutionResult process(const Command& command, PgConnection& connection,
+        bool* servedFromCache = nullptr);
 
     const OrderBook& orderBook() const noexcept;
 
