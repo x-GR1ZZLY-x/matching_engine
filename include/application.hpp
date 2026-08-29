@@ -15,11 +15,14 @@ public:
     // умолчанию), JSON-пакет команд (обычный режим) либо путь к файлу
     // нагрузки (--replay, режим воспроизведения). Ровно один из jsonArg /
     // replayPath заполнен при успешном разборе — режимы взаимоисключающие.
+    // batch (--batch, задача 12) допустим только вместе с --replay — без
+    // него это ошибка разбора, как и прочие недопустимые сочетания
+    // (docs/tasks/task-12.md, критерий 4).
     // Возвращает false, если обработку нужно прервать — тогда errorMessage
     // всегда содержит текст для вывода (справку по использованию либо
     // описание конкретной ошибки разбора).
     static bool parseArgs(int argc, char** argv, std::string& configPath,
-        std::string& jsonArg, std::string& replayPath, std::string& errorMessage);
+        std::string& jsonArg, std::string& replayPath, bool& batch, std::string& errorMessage);
 
 private:
     CommandParser parser_;
@@ -50,8 +53,14 @@ private:
     // printTrades различает обычный режим (true — каждая сделка печатается
     // сразу, поведение не изменилось) и replay (false — сделки только
     // считаются, см. runReplay).
+    //
+    // batch — только для режима --replay --batch (задача 12): сопоставление
+    // и запись в кеш идемпотентности идут как обычно (CommandProcessor::
+    // processBatched), но запись в БД откладывается до flushBatch и connection
+    // в этой ветке не используется. В штатном режиме batch всегда false, и
+    // вызывается CommandProcessor::process — без единого изменения поведения.
     CommandOutcome processCommand(const nlohmann::json& commandJson, PgConnection& connection,
-        bool printTrades);
+        bool printTrades, bool batch);
 
     // Режим воспроизведения нагрузки (задача 10, REQ-PERF-02): читает файл
     // построчно (по одной JSON-команде на строку), прогоняет каждую строку
@@ -65,7 +74,13 @@ private:
     // же вызове) — в обоих случаях run() должен завершиться с кодом 1.
     // Иначе true — даже если часть строк файла была пропущена как ошибочная
     // (это не ошибка потока, а ожидаемый разбор построчно).
-    bool runReplay(const std::string& path, PgConnection& connection);
+    //
+    // batch включает пакетную запись (задача 12, REQ-OPT-03): вместо
+    // транзакции на команду накопленное пишется одной транзакцией каждые
+    // kReplayBatchSize команд и остатком после конца файла. Только для
+    // --replay — штатный режим (Application::run без --replay) этот
+    // параметр не передаёт вовсе.
+    bool runReplay(const std::string& path, PgConnection& connection, bool batch);
 };
 
 }

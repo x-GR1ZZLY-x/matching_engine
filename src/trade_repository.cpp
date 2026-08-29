@@ -1,5 +1,6 @@
 #include"trade_repository.hpp"
 #include"exceptions.hpp"
+#include"sql_batch_insert.hpp"
 #include<optional>
 #include<string>
 #include<vector>
@@ -30,10 +31,31 @@ void TradeRepository::insert(PgConnection& connection, const Trade& trade){
         std::to_string(trade.getQuantity())
     };
 
-    connection.execute(
+    // Выполняется на каждой сделке — подготовленный запрос (задача 12)
+    // экономит повторный разбор и планирование этой вставки.
+    connection.executePrepared(
+        "trade_repository_insert",
         "INSERT INTO trades (buy_order_id, sell_order_id, price, quantity) "
         "VALUES ($1, $2, $3, $4)",
         params);
+}
+
+void TradeRepository::insertBatch(PgConnection& connection, const std::vector<Trade>& trades){
+    // Резка на несколько execute() при превышении предела параметров
+    // протокола и построение плейсхолдеров — общие для трёх репозиториев,
+    // см. sql_batch_insert.hpp; rowCount == 0 там же обрабатывается как no-op.
+    executeBatchedInsert(connection, trades.size(), 4,
+        "INSERT INTO trades (buy_order_id, sell_order_id, price, quantity) VALUES ",
+        "",
+        [&trades](std::size_t row) -> std::vector<std::optional<std::string>>{
+            const Trade& trade = trades[row];
+            return {
+                std::to_string(trade.getBuyOrderId()),
+                std::to_string(trade.getSellOrderId()),
+                std::to_string(trade.getPrice()),
+                std::to_string(trade.getQuantity())
+            };
+        });
 }
 
 std::vector<Trade> TradeRepository::loadAll(PgConnection& connection){

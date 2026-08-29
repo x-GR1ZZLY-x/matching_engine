@@ -32,6 +32,16 @@ public:
         const std::string& commandType, const std::string& status,
         const std::optional<std::string>& result);
 
+    // Пакетная запись (задача 12, REQ-OPT-03): многострочный INSERT на весь
+    // список записей пакета, за один или несколько execute() (см.
+    // sql_batch_insert.hpp — список режется по числу строк, если иначе
+    // запрос превысил бы протокольный предел параметров PostgreSQL), без
+    // ON CONFLICT — как и у save(), повторный command_id внутри пакета не
+    // ожидается (кеш идемпотентности не пускает его в буфер CommandProcessor
+    // дважды) и должен упасть на первичном ключе, если всё же произошёл.
+    // Пустой список — no-op.
+    void saveBatch(PgConnection& connection, const std::vector<ProcessedCommandRecord>& records);
+
     std::optional<ProcessedCommandRecord> findById(PgConnection& connection,
         const std::string& commandId);
 

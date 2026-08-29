@@ -1,8 +1,10 @@
 #pragma once
 
+#include<cstddef>
 #include<memory>
 #include<optional>
 #include<string>
+#include<vector>
 #include"command.hpp"
 #include"command_cache.hpp"
 #include"execution_result.hpp"
@@ -45,6 +47,30 @@ public:
     ExecutionResult process(const Command& command, PgConnection& connection,
         bool* servedFromCache = nullptr);
 
+    // Пакетный режим replay (задача 12, REQ-OPT-03): сопоставление в памяти
+    // и запись в кеш идемпотентности происходят немедленно и в том же
+    // порядке, что и в process() (иначе повтор command_id внутри одного
+    // пакета не был бы опознан). Запись в БД откладывается — команда лишь
+    // копится во внутреннем буфере, который flushBatch() отправляет в БД
+    // одной транзакцией. Не принимает PgConnection: до вызова flushBatch()
+    // соединение этому пути не нужно вовсе. servedFromCache имеет тот же
+    // смысл, что и в process().
+    ExecutionResult processBatched(const Command& command, bool* servedFromCache = nullptr);
+
+    // Сбрасывает накопленный пакет одной PgTransaction: заявки всех команд
+    // пакета, затем сделки всех команд пакета, затем записи
+    // processed_commands (порядок — из-за внешнего ключа trades ->
+    // orders(order_id), докстрока PersistenceService::saveBatch). Пустой
+    // пакет — это no-op, транзакция не открывается вовсе. Бросает
+    // PersistenceError при сбое, как и process() — тот же фатальный класс
+    // ошибок.
+    void flushBatch(PgConnection& connection);
+
+    // Число команд, накопленных с последнего flushBatch() (или с начала
+    // работы), — для Application::runReplay, который решает, когда позвать
+    // flushBatch, не заглядывая во внутреннее устройство буфера.
+    std::size_t pendingCount() const noexcept;
+
     const OrderBook& orderBook() const noexcept;
 
     // Восстановление при старте (задача 08, RecoveryService, см.
@@ -71,6 +97,14 @@ private:
     CommandCache cache_;
     MatchingEngine engine_;
     PersistenceService persistence_;
+
+    // Буфер пакетного режима (--replay --batch): результаты и записи
+    // processed_commands ещё не отправленных в БД команд, в порядке их
+    // обработки. Оба вектора растут и опустошаются синхронно — на каждый
+    // элемент pendingResults_ приходится ровно один элемент pendingRecords_
+    // с тем же индексом.
+    std::vector<ExecutionResult> pendingResults_;
+    std::vector<ProcessedCommandRecord> pendingRecords_;
 };
 
 }
