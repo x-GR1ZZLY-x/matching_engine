@@ -1,4 +1,5 @@
 #pragma once
+#include<chrono>
 #include<vector>
 #include"trade.hpp"
 #include"order_book.hpp"
@@ -10,6 +11,20 @@ public:
     void printTrade(const Trade& trade) const;
     void printOrderBook(const OrderBook& book) const;
     void printError(const std::string& message) const;
+
+    // Итоговая сводка режима --replay (задача 10, критерий 3; уточнено
+    // ревью, правка 1). processedCommands и trades — счётчики только для
+    // команд со статусом Applied: processedCommands равен числу строк,
+    // добавленных в этом прогоне в processed_commands, trades — числу
+    // строк, добавленных в trades. Команда, обслуженная из кеша
+    // идемпотентности (повторный command_id), в БД ничего не пишет и
+    // попадает в duplicates, а не в processedCommands/trades — иначе её
+    // сделки считались бы дважды. skippedLines — строки, пропущенные из-за
+    // ошибок разбора или доменных ошибок. Единственное место, печатающее
+    // сводку — ReportPrinter остаётся единственным классом со std::cout.
+    void printReplaySummary(long long processedCommands, long long trades,
+        long long duplicates, long long skippedLines,
+        std::chrono::milliseconds elapsed) const;
 };
 
 }
