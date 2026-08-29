@@ -127,4 +127,22 @@ target_link_libraries(
 include(GoogleTest)
 gtest_discover_tests(matching_engine_tests)
 
+# REQ-OPT-01: запускает весь набор тестов под Valgrind одной командой сборки.
+# ctest -T memcheck здесь не годится: найденные дефекты не влияют на код
+# возврата ctest, и таргет был бы молча зелёным всегда. Поэтому valgrind
+# вызывается напрямую на бинарнике тестов, а --error-exitcode=1 превращает
+# любую найденную ошибку (включая утечки — при --leak-check=full они тоже
+# считаются ошибками) в ненулевой код возврата команды.
+# WORKING_DIRECTORY = корень репозитория: Application::run применяет схему
+# из относительного пути "database", и часть тестов рассчитывает на рабочий
+# каталог, совпадающий с тем, что использует ctest.
+add_custom_target(
+    memcheck
+    COMMAND valgrind --leak-check=full --show-leak-kinds=all --error-exitcode=1
+        $<TARGET_FILE:matching_engine_tests>
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    DEPENDS matching_engine_tests
+    COMMENT "Running matching_engine_tests under Valgrind memcheck"
+)
+
 
