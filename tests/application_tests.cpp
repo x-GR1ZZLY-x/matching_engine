@@ -9,7 +9,7 @@ namespace {
 
 // Помощник: собирает argv из строк и вызывает Application::parseArgs.
 bool callParseArgs(std::vector<std::string> args, std::string& configPath,
-    std::string& jsonArg, std::string& replayPath, std::string& errorMessage){
+    std::string& jsonArg, std::string& replayPath, bool& batch, std::string& errorMessage){
 
     std::vector<char*> argv;
     argv.push_back(const_cast<char*>("matching_engine"));
@@ -18,27 +18,31 @@ bool callParseArgs(std::vector<std::string> args, std::string& configPath,
     }
 
     return Application::parseArgs(static_cast<int>(argv.size()), argv.data(),
-        configPath, jsonArg, replayPath, errorMessage);
+        configPath, jsonArg, replayPath, batch, errorMessage);
 }
 
 }
 
 TEST(ApplicationParseArgsTest, DefaultConfigPathWhenNoConfigOption){
     std::string configPath, jsonArg, replayPath, error;
+    bool batch = false;
 
-    const bool ok = callParseArgs({"{\"commands\":[]}"}, configPath, jsonArg, replayPath, error);
+    const bool ok = callParseArgs({"{\"commands\":[]}"}, configPath, jsonArg, replayPath, batch,
+        error);
 
     EXPECT_TRUE(ok);
     EXPECT_EQ(configPath, "config/database.json");
     EXPECT_EQ(jsonArg, "{\"commands\":[]}");
     EXPECT_TRUE(replayPath.empty());
+    EXPECT_FALSE(batch);
 }
 
 TEST(ApplicationParseArgsTest, ConfigOptionBeforePositionalArg){
     std::string configPath, jsonArg, replayPath, error;
+    bool batch = false;
 
     const bool ok = callParseArgs({"--config", "custom.json", "{\"commands\":[]}"},
-        configPath, jsonArg, replayPath, error);
+        configPath, jsonArg, replayPath, batch, error);
 
     EXPECT_TRUE(ok);
     EXPECT_EQ(configPath, "custom.json");
@@ -47,9 +51,10 @@ TEST(ApplicationParseArgsTest, ConfigOptionBeforePositionalArg){
 
 TEST(ApplicationParseArgsTest, ConfigOptionAfterPositionalArg){
     std::string configPath, jsonArg, replayPath, error;
+    bool batch = false;
 
     const bool ok = callParseArgs({"{\"commands\":[]}", "--config", "custom.json"},
-        configPath, jsonArg, replayPath, error);
+        configPath, jsonArg, replayPath, batch, error);
 
     EXPECT_TRUE(ok);
     EXPECT_EQ(configPath, "custom.json");
@@ -58,8 +63,9 @@ TEST(ApplicationParseArgsTest, ConfigOptionAfterPositionalArg){
 
 TEST(ApplicationParseArgsTest, ConfigOptionWithoutValueFails){
     std::string configPath, jsonArg, replayPath, error;
+    bool batch = false;
 
-    const bool ok = callParseArgs({"--config"}, configPath, jsonArg, replayPath, error);
+    const bool ok = callParseArgs({"--config"}, configPath, jsonArg, replayPath, batch, error);
 
     EXPECT_FALSE(ok);
     EXPECT_FALSE(error.empty());
@@ -71,8 +77,9 @@ TEST(ApplicationParseArgsTest, ConfigOptionWithoutValueFails){
 // тестами ниже, а неизвестный ключ проверяется на другом имени.
 TEST(ApplicationParseArgsTest, UnknownOptionFails){
     std::string configPath, jsonArg, replayPath, error;
+    bool batch = false;
 
-    const bool ok = callParseArgs({"--verbose"}, configPath, jsonArg, replayPath, error);
+    const bool ok = callParseArgs({"--verbose"}, configPath, jsonArg, replayPath, batch, error);
 
     EXPECT_FALSE(ok);
     EXPECT_EQ(error, "Unknown option: --verbose");
@@ -80,9 +87,10 @@ TEST(ApplicationParseArgsTest, UnknownOptionFails){
 
 TEST(ApplicationParseArgsTest, ExtraPositionalArgFails){
     std::string configPath, jsonArg, replayPath, error;
+    bool batch = false;
 
     const bool ok = callParseArgs({"{\"commands\":[]}", "{\"commands\":[]}"},
-        configPath, jsonArg, replayPath, error);
+        configPath, jsonArg, replayPath, batch, error);
 
     EXPECT_FALSE(ok);
     EXPECT_FALSE(error.empty());
@@ -90,19 +98,22 @@ TEST(ApplicationParseArgsTest, ExtraPositionalArgFails){
 
 TEST(ApplicationParseArgsTest, ReplayOptionWithPathSucceeds){
     std::string configPath, jsonArg, replayPath, error;
+    bool batch = false;
 
     const bool ok = callParseArgs({"--replay", "workload.jsonl"},
-        configPath, jsonArg, replayPath, error);
+        configPath, jsonArg, replayPath, batch, error);
 
     EXPECT_TRUE(ok);
     EXPECT_EQ(replayPath, "workload.jsonl");
     EXPECT_TRUE(jsonArg.empty());
+    EXPECT_FALSE(batch);
 }
 
 TEST(ApplicationParseArgsTest, ReplayOptionWithoutValueFails){
     std::string configPath, jsonArg, replayPath, error;
+    bool batch = false;
 
-    const bool ok = callParseArgs({"--replay"}, configPath, jsonArg, replayPath, error);
+    const bool ok = callParseArgs({"--replay"}, configPath, jsonArg, replayPath, batch, error);
 
     EXPECT_FALSE(ok);
     EXPECT_FALSE(error.empty());
@@ -110,9 +121,10 @@ TEST(ApplicationParseArgsTest, ReplayOptionWithoutValueFails){
 
 TEST(ApplicationParseArgsTest, ReplayTogetherWithPositionalJsonFails){
     std::string configPath, jsonArg, replayPath, error;
+    bool batch = false;
 
     const bool ok = callParseArgs({"--replay", "workload.jsonl", "{\"commands\":[]}"},
-        configPath, jsonArg, replayPath, error);
+        configPath, jsonArg, replayPath, batch, error);
 
     EXPECT_FALSE(ok);
     EXPECT_FALSE(error.empty());
@@ -120,11 +132,90 @@ TEST(ApplicationParseArgsTest, ReplayTogetherWithPositionalJsonFails){
 
 TEST(ApplicationParseArgsTest, ReplayTogetherWithConfigOptionParsesBoth){
     std::string configPath, jsonArg, replayPath, error;
+    bool batch = false;
 
     const bool ok = callParseArgs({"--config", "custom.json", "--replay", "workload.jsonl"},
-        configPath, jsonArg, replayPath, error);
+        configPath, jsonArg, replayPath, batch, error);
 
     EXPECT_TRUE(ok);
     EXPECT_EQ(configPath, "custom.json");
     EXPECT_EQ(replayPath, "workload.jsonl");
+}
+
+// --batch появился в задаче 12 (вторая часть, пакетная запись при
+// воспроизведении нагрузки) — те же три сценария, что проверялись для
+// --replay в задаче 10: принят вместе с --replay, без значения (флаг), и в
+// недопустимом сочетании (без --replay).
+TEST(ApplicationParseArgsTest, BatchOptionWithReplaySucceeds){
+    std::string configPath, jsonArg, replayPath, error;
+    bool batch = false;
+
+    const bool ok = callParseArgs({"--replay", "workload.jsonl", "--batch"},
+        configPath, jsonArg, replayPath, batch, error);
+
+    EXPECT_TRUE(ok);
+    EXPECT_EQ(replayPath, "workload.jsonl");
+    EXPECT_TRUE(batch);
+}
+
+TEST(ApplicationParseArgsTest, BatchOptionBeforeReplaySucceeds){
+    std::string configPath, jsonArg, replayPath, error;
+    bool batch = false;
+
+    const bool ok = callParseArgs({"--batch", "--replay", "workload.jsonl"},
+        configPath, jsonArg, replayPath, batch, error);
+
+    EXPECT_TRUE(ok);
+    EXPECT_EQ(replayPath, "workload.jsonl");
+    EXPECT_TRUE(batch);
+}
+
+TEST(ApplicationParseArgsTest, BatchOptionWithConfigAndReplayParsesAll){
+    std::string configPath, jsonArg, replayPath, error;
+    bool batch = false;
+
+    const bool ok = callParseArgs({"--config", "custom.json", "--replay", "workload.jsonl",
+        "--batch"}, configPath, jsonArg, replayPath, batch, error);
+
+    EXPECT_TRUE(ok);
+    EXPECT_EQ(configPath, "custom.json");
+    EXPECT_EQ(replayPath, "workload.jsonl");
+    EXPECT_TRUE(batch);
+}
+
+// --batch — флаг, а не опция со значением: следующий аргумент не
+// поглощается и остаётся отдельным значением для своей собственной опции
+// (--batch стоит не последним, иначе поглощать нечего и тест совпадает с
+// BatchOptionWithReplaySucceeds).
+TEST(ApplicationParseArgsTest, BatchOptionTakesNoValue){
+    std::string configPath, jsonArg, replayPath, error;
+    bool batch = false;
+
+    const bool ok = callParseArgs({"--replay", "workload.jsonl", "--batch", "--config",
+        "custom.json"}, configPath, jsonArg, replayPath, batch, error);
+
+    EXPECT_TRUE(ok);
+    EXPECT_EQ(replayPath, "workload.jsonl");
+    EXPECT_EQ(configPath, "custom.json");
+}
+
+TEST(ApplicationParseArgsTest, BatchOptionWithoutReplayFails){
+    std::string configPath, jsonArg, replayPath, error;
+    bool batch = false;
+
+    const bool ok = callParseArgs({"--batch"}, configPath, jsonArg, replayPath, batch, error);
+
+    EXPECT_FALSE(ok);
+    EXPECT_EQ(error, "Option --batch requires --replay");
+}
+
+TEST(ApplicationParseArgsTest, BatchOptionWithPositionalJsonFails){
+    std::string configPath, jsonArg, replayPath, error;
+    bool batch = false;
+
+    const bool ok = callParseArgs({"--batch", "{\"commands\":[]}"},
+        configPath, jsonArg, replayPath, batch, error);
+
+    EXPECT_FALSE(ok);
+    EXPECT_FALSE(error.empty());
 }

@@ -18,9 +18,16 @@ constexpr const char* kDefaultConfigPath = "config/database.json";
 constexpr const char* kSchemaDir = "database";
 constexpr const char* kUsage =
     "Usage: matching_engine [--config <path>] '<json>'\n"
-    "       matching_engine [--config <path>] --replay <file.jsonl>\n"
+    "       matching_engine [--config <path>] --replay <file.jsonl> [--batch]\n"
     "  Commands that change state (ADD, CANCEL, MODIFY) must include a "
     "unique \"command_id\" field; PRINT does not need one.\n";
+
+// Размер пакета при --replay --batch (задача 12, REQ-OPT-03): каждые
+// столько команд накопленное сохраняется одной транзакцией (см.
+// CommandProcessor::flushBatch). Число не выносится отдельным ключом
+// командной строки — задача явно этого не просит, а внутренняя константа
+// достаточна для сравнения "было -> стало" в README.
+constexpr std::size_t kReplayBatchSize = 500;
 
 // Человеческое сообщение для случая недоступной БД: куда шло подключение и
 // что проверить. Пароль в сообщение не попадает; сырой текст драйвера
@@ -45,10 +52,11 @@ std::string describeSchemaFailure(const std::string& schemaDir){
 }
 
 bool Application::parseArgs(int argc, char** argv, std::string& configPath,
-    std::string& jsonArg, std::string& replayPath, std::string& errorMessage){
+    std::string& jsonArg, std::string& replayPath, bool& batch, std::string& errorMessage){
     configPath = kDefaultConfigPath;
     jsonArg.clear();
     replayPath.clear();
+    batch = false;
     bool hasJsonArg = false;
     bool hasReplay = false;
     errorMessage.clear();
@@ -68,6 +76,10 @@ bool Application::parseArgs(int argc, char** argv, std::string& configPath,
             }
             replayPath = argv[++i];
             hasReplay = true;
+        } else if(arg == "--batch"){
+            // Флаг без значения, как в описании задачи 12 — следующий
+            // аргумент не поглощается.
+            batch = true;
         } else if(arg.rfind("--", 0) == 0){
             errorMessage = "Unknown option: " + arg;
             return false;
@@ -85,6 +97,13 @@ bool Application::parseArgs(int argc, char** argv, std::string& configPath,
         return false;
     }
 
+    if(batch && !hasReplay){
+        // Критерий 4 задачи 12: пакетная запись — только вместе с --replay,
+        // без него это ошибка разбора, как и прочие недопустимые сочетания.
+        errorMessage = "Option --batch requires --replay";
+        return false;
+    }
+
     if(!hasReplay && !hasJsonArg){
         errorMessage = kUsage;
         return false;
@@ -99,8 +118,9 @@ int Application::run(int argc, char** argv){
     std::string configPath;
     std::string jsonArg;
     std::string replayPath;
+    bool batch = false;
     std::string parseError;
-    if(!parseArgs(argc, argv, configPath, jsonArg, replayPath, parseError)){
+    if(!parseArgs(argc, argv, configPath, jsonArg, replayPath, batch, parseError)){
         if(parseError == kUsage){
             std::cerr << parseError;
         } else {
@@ -166,7 +186,7 @@ int Application::run(int argc, char** argv){
     if(!replayPath.empty()){
         bool replayOk = false;
         try{
-            replayOk = runReplay(replayPath, *connection);
+            replayOk = runReplay(replayPath, *connection, batch);
         } catch(const PersistenceError& e){
             Logger::instance().error(std::string("Persistence error: ") + e.what());
             printer_.printError(std::string("Failed to save results to the database, "
@@ -211,7 +231,7 @@ int Application::run(int argc, char** argv){
     // main() и обернулось бы неперехваченным std::terminate.
     try{
         for(const auto& commandJson : root["commands"]){
-            processCommand(commandJson, *connection, /*printTrades=*/true);
+            processCommand(commandJson, *connection, /*printTrades=*/true, /*batch=*/false);
         }
     } catch(const PersistenceError& e){
         Logger::instance().error(std::string("Persistence error: ") + e.what());
@@ -225,7 +245,7 @@ int Application::run(int argc, char** argv){
 }
 
 Application::CommandOutcome Application::processCommand(const nlohmann::json& commandJson,
-    PgConnection& connection, bool printTrades){
+    PgConnection& connection, bool printTrades, bool batch){
     std::unique_ptr<Command> command;
 
     try{
@@ -244,7 +264,15 @@ Application::CommandOutcome Application::processCommand(const nlohmann::json& co
     ExecutionResult result;
     bool servedFromCache = false;
     try{
-        result = processor_.process(*command, connection, &servedFromCache);
+        // batch (--replay --batch, задача 12) откладывает запись в БД до
+        // flushBatch — сопоставление и кеш идемпотентности отрабатывают как
+        // обычно. Штатный режим (batch == false) вызывает process() без
+        // единого изменения — критерий 3 задачи 12.
+        if(batch){
+            result = processor_.processBatched(*command, &servedFromCache);
+        } else {
+            result = processor_.process(*command, connection, &servedFromCache);
+        }
     } catch(const PersistenceError&){
         // PersistenceError наследует MatchingEngineError (конвенция
         // проекта) — обязан быть перехвачен и проброшен раньше
@@ -283,7 +311,7 @@ Application::CommandOutcome Application::processCommand(const nlohmann::json& co
         static_cast<int>(result.trades.size())};
 }
 
-bool Application::runReplay(const std::string& path, PgConnection& connection){
+bool Application::runReplay(const std::string& path, PgConnection& connection, bool batch){
     std::ifstream file(path);
     if(!file.is_open()){
         Logger::instance().error("Cannot open replay file: " + path);
@@ -324,9 +352,11 @@ bool Application::runReplay(const std::string& path, PgConnection& connection){
 
         // PersistenceError не перехватывается здесь — она должна дойти до
         // run(), который завершает процесс (см. критерий 4 задания и
-        // docs/plan.md, "Обработка ошибок: два разных класса").
+        // docs/plan.md, "Обработка ошибок: два разных класса"). В пакетном
+        // режиме она может прилететь только из flushBatch ниже — processCommand
+        // с batch == true в БД не пишет вовсе.
         const CommandOutcome outcome = processCommand(commandJson, connection,
-            /*printTrades=*/false);
+            /*printTrades=*/false, batch);
         switch(outcome.status){
             case CommandOutcome::Status::Applied:
                 ++processedCount;
@@ -341,6 +371,22 @@ bool Application::runReplay(const std::string& path, PgConnection& connection){
                 ++skippedCount;
                 break;
         }
+
+        // Сброс пакета каждые kReplayBatchSize накопленных команд
+        // (docs/tasks/task-12.md, "Накопление и сброс пакета"). pendingCount()
+        // считает реально отложенные записи, а не строки файла, — PRINT,
+        // повторы идемпотентности и ошибочные строки в пакет не попадают.
+        if(batch && processor_.pendingCount() >= kReplayBatchSize){
+            processor_.flushBatch(connection);
+        }
+    }
+
+    // Остаток пакета обязан быть сброшен после конца файла независимо от
+    // того, как цикл завершился, — иначе последние (неполные kReplayBatchSize)
+    // команды пропали бы из БД, хотя уже попали в кеш идемпотентности и в
+    // сводку ниже (docs/tasks/task-12.md, критерий 7).
+    if(batch){
+        processor_.flushBatch(connection);
     }
 
     // getline возвращает false и по достижении конца файла (eof, прогон

@@ -148,6 +148,55 @@ ExecutionResult CommandProcessor::process(const Command& command, PgConnection& 
     return result;
 }
 
+ExecutionResult CommandProcessor::processBatched(const Command& command, bool* servedFromCache){
+    if(!command.commandId_ || command.commandId_->empty()){
+        throw ParseError("command_id is required for a state-changing command (type " +
+            commandTypeToString(command.type_) + ")");
+    }
+    const std::string& commandId = *command.commandId_;
+
+    if(const ExecutionResult* cached = cache_.find(commandId)){
+        // Тот же ранний возврат, что и в process(): команда уже отработана
+        // (в этом пакете или раньше), книгу не трогаем и в буфер ничего не
+        // добавляем.
+        if(servedFromCache){
+            *servedFromCache = true;
+        }
+        return *cached;
+    }
+
+    ExecutionResult result = engine_.process(command);
+
+    ProcessedCommandRecord record{commandId, commandTypeToString(command.type_),
+        kAppliedStatus, serializeResult(result)};
+
+    // Кеш заполняется сразу, а не после flushBatch (docs/tasks/task-12.md,
+    // "Доменные правила", п.3): иначе повтор command_id внутри одного
+    // пакета не был бы опознан и команда выполнилась бы дважды.
+    cache_.put(commandId, result);
+
+    pendingResults_.push_back(result);
+    pendingRecords_.push_back(std::move(record));
+
+    if(servedFromCache){
+        *servedFromCache = false;
+    }
+    return result;
+}
+
+void CommandProcessor::flushBatch(PgConnection& connection){
+    if(pendingRecords_.empty()){
+        return;
+    }
+    persistence_.saveBatch(connection, pendingResults_, pendingRecords_);
+    pendingResults_.clear();
+    pendingRecords_.clear();
+}
+
+std::size_t CommandProcessor::pendingCount() const noexcept{
+    return pendingRecords_.size();
+}
+
 const OrderBook& CommandProcessor::orderBook() const noexcept{
     return engine_.orderBook();
 }

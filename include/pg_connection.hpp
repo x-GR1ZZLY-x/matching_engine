@@ -2,6 +2,7 @@
 
 #include<memory>
 #include<optional>
+#include<set>
 #include<string>
 #include<vector>
 #include"pg_result.hpp"
@@ -48,6 +49,19 @@ public:
     PgResult execute(const std::string& sql,
         const std::vector<std::optional<std::string>>& params = {});
 
+    // Готовит sql под именем name один раз за сессию (PQprepare) и на всех
+    // следующих вызовах с тем же именем сразу выполняет его (PQexecPrepared),
+    // экономя разбор и планирование запроса. Значения передаются отдельным
+    // массивом, как и в execute() — конкатенации в текст запроса нет.
+    //
+    // Подготовленный запрос живёт до конца сессии и откатом транзакции не
+    // отменяется — проверено на используемом сервере: запрос, подготовленный
+    // внутри транзакции, остаётся в pg_prepared_statements после ROLLBACK и
+    // продолжает выполняться. Поэтому имени, однажды попавшего в
+    // preparedStatements_, достаточно, и повторной подготовки не требуется.
+    PgResult executePrepared(const std::string& name, const std::string& sql,
+        const std::vector<std::optional<std::string>>& params = {});
+
     // Выполняет sql через PQexec: в отличие от execute()/PQexecParams,
     // принимает несколько ';'-разделённых операторов в одной строке и
     // не принимает параметров. Операторы одного вызова выполняются одной
@@ -65,6 +79,13 @@ private:
 
     std::unique_ptr<pg_conn, PgConnectionDeleter> conn_;
     int activeTransactionCount_ = 0;
+
+    // Имена запросов, уже подготовленных (PQprepare) на текущей сессии этого
+    // соединения. Живёт в сессии, а не в объекте языка C++ — поэтому обязано
+    // переезжать вместе с conn_ при перемещении PgConnection, иначе после
+    // move этот набор считал бы подготовленными запросы, которых на самом
+    // деле подготовило другое, уже перемещённое соединение.
+    std::set<std::string> preparedStatements_;
 };
 
 }

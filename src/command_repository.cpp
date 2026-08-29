@@ -1,4 +1,5 @@
 #include"command_repository.hpp"
+#include"sql_batch_insert.hpp"
 #include<optional>
 #include<string>
 #include<vector>
@@ -26,10 +27,27 @@ void CommandRepository::save(PgConnection& connection, const std::string& comman
 
     std::vector<std::optional<std::string>> params{commandId, commandType, status, result};
 
-    connection.execute(
+    // Выполняется на каждой изменяющей команде — подготовленный запрос
+    // (задача 12) экономит повторный разбор и планирование этой вставки.
+    connection.executePrepared(
+        "command_repository_insert",
         "INSERT INTO processed_commands (command_id, command_type, status, result) "
         "VALUES ($1, $2, $3, $4)",
         params);
+}
+
+void CommandRepository::saveBatch(PgConnection& connection,
+    const std::vector<ProcessedCommandRecord>& records){
+    // Резка на несколько execute() при превышении предела параметров
+    // протокола и построение плейсхолдеров — общие для трёх репозиториев,
+    // см. sql_batch_insert.hpp; rowCount == 0 там же обрабатывается как no-op.
+    executeBatchedInsert(connection, records.size(), 4,
+        "INSERT INTO processed_commands (command_id, command_type, status, result) VALUES ",
+        "",
+        [&records](std::size_t row) -> std::vector<std::optional<std::string>>{
+            const ProcessedCommandRecord& record = records[row];
+            return {record.commandId, record.commandType, record.status, record.result};
+        });
 }
 
 std::optional<ProcessedCommandRecord> CommandRepository::findById(PgConnection& connection,
