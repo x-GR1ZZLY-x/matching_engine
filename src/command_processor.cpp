@@ -7,8 +7,8 @@ namespace matching_engine{
 
 namespace{
 
-// AddCommand и MarketAddCommand оба несут CommandType::Add (CLAUDE.md,
-// "Command: тип команды не однозначно определяет класс"), поэтому рыночная
+// AddCommand и MarketAddCommand оба несут CommandType::Add ("Command: тип
+// команды не однозначно определяет класс"), поэтому рыночная
 // заявка записывается в processed_commands с command_type = 'ADD', а не
 // отдельным значением вроде MARKET_ADD. Это осознанно: различение через
 // dynamic_cast завело бы третью точку развилки «лимитная/рыночная», а

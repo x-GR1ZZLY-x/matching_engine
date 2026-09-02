@@ -12,6 +12,12 @@ public:
     void printOrderBook(const OrderBook& book) const;
     void printError(const std::string& message) const;
 
+    // Справка по использованию (нет аргументов вовсе) — не ошибка, поэтому
+    // без префикса "ERROR:", но в stderr, как и printError: это тоже
+    // пользовательский вывод, а не результат работы движка, и не должен
+    // попадать в stdout вперемешку с TRADE/ORDER BOOK/REPLAY SUMMARY.
+    void printUsage(const std::string& usage) const;
+
     // Итоговая сводка режима --replay (задача 10, критерий 3; уточнено
     // ревью, правка 1). processedCommands и trades — счётчики только для
     // команд со статусом Applied: processedCommands равен числу строк,
