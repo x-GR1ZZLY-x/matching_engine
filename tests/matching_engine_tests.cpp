@@ -386,3 +386,205 @@ TEST(MatchingEngineTest, ModifyNonExistentOrder) {
     ModifyCommand modCmd(999, 100, 10);
     EXPECT_THROW(engine.process(modCmd), OrderBookError);
 }
+
+// ─── ExecutionResult: снимки затронутых заявок (REQ-REC-04) ─────────────────
+
+static const OrderChange* findChange(const ExecutionResult& result, int id) {
+    for (const auto& change : result.orderChanges) {
+        if (change.id == id) return &change;
+    }
+    return nullptr;
+}
+
+TEST(MatchingEngineTest, ExecutionResultNoMatchHasNewOrderSnapshot) {
+    MatchingEngine engine;
+    auto result = engine.process(makeAdd(1, Side::Buy, 100, 10));
+
+    EXPECT_TRUE(result.trades.empty());
+    ASSERT_EQ(result.orderChanges.size(), 1u);
+
+    const auto& change = result.orderChanges[0];
+    EXPECT_EQ(change.id, 1);
+    EXPECT_EQ(change.side, Side::Buy);
+    ASSERT_TRUE(change.price.has_value());
+    EXPECT_EQ(change.price.value(), 100);
+    EXPECT_EQ(change.initialQuantity, 10);
+    EXPECT_EQ(change.remainingQuantity, 10);
+    EXPECT_EQ(change.status, OrderStatus::Open);
+}
+
+TEST(MatchingEngineTest, ExecutionResultPartialFillStatuses) {
+    MatchingEngine engine;
+    engine.process(makeAdd(1, Side::Sell, 100, 5));
+    auto result = engine.process(makeAdd(2, Side::Buy, 100, 10));
+
+    ASSERT_EQ(result.trades.size(), 1u);
+    ASSERT_EQ(result.orderChanges.size(), 2u);
+
+    const auto* sellChange = findChange(result, 1);
+    const auto* buyChange  = findChange(result, 2);
+    ASSERT_NE(sellChange, nullptr);
+    ASSERT_NE(buyChange, nullptr);
+
+    // Заявка из книги полностью исполнена
+    EXPECT_EQ(sellChange->status, OrderStatus::Filled);
+    EXPECT_EQ(sellChange->remainingQuantity, 0);
+
+    // Входящая заявка исполнена частично — статус, а не исходный Open
+    EXPECT_EQ(buyChange->status, OrderStatus::PartiallyFilled);
+    EXPECT_EQ(buyChange->initialQuantity, 10);
+    EXPECT_EQ(buyChange->remainingQuantity, 5);
+}
+
+TEST(MatchingEngineTest, ExecutionResultBookOrderPartiallyFilledStaysInBook) {
+    MatchingEngine engine;
+    engine.process(makeAdd(1, Side::Sell, 100, 10));
+    auto result = engine.process(makeAdd(2, Side::Buy, 100, 5));
+
+    ASSERT_EQ(result.trades.size(), 1u);
+    ASSERT_EQ(result.orderChanges.size(), 2u);
+
+    const auto* sellChange = findChange(result, 1);
+    const auto* buyChange  = findChange(result, 2);
+    ASSERT_NE(sellChange, nullptr);
+    ASSERT_NE(buyChange, nullptr);
+
+    // Книжная заявка исполнена частично и остаётся в книге
+    EXPECT_EQ(sellChange->status, OrderStatus::PartiallyFilled);
+    EXPECT_EQ(sellChange->remainingQuantity, 5);
+    EXPECT_NE(engine.orderBook().findOrder(1), nullptr);
+
+    // Входящая заявка исполнена полностью
+    EXPECT_EQ(buyChange->status, OrderStatus::Filled);
+    EXPECT_EQ(buyChange->remainingQuantity, 0);
+}
+
+TEST(MatchingEngineTest, ExecutionResultFullMatchBothFilled) {
+    MatchingEngine engine;
+    engine.process(makeAdd(1, Side::Sell, 100, 10));
+    auto result = engine.process(makeAdd(2, Side::Buy, 100, 10));
+
+    ASSERT_EQ(result.trades.size(), 1u);
+    ASSERT_EQ(result.orderChanges.size(), 2u);
+
+    for (const auto& change : result.orderChanges) {
+        EXPECT_EQ(change.status, OrderStatus::Filled);
+        EXPECT_EQ(change.remainingQuantity, 0);
+    }
+}
+
+TEST(MatchingEngineTest, ExecutionResultMultipleLevelsReportAllTouchedOrders) {
+    MatchingEngine engine;
+    engine.process(makeAdd(1, Side::Sell, 100, 3));
+    engine.process(makeAdd(2, Side::Sell, 101, 4));
+    auto result = engine.process(makeAdd(3, Side::Buy, 101, 7));
+
+    ASSERT_EQ(result.trades.size(), 2u);
+    // Обе книжные заявки-контрагенты и входящая заявка
+    ASSERT_EQ(result.orderChanges.size(), 3u);
+    EXPECT_NE(findChange(result, 1), nullptr);
+    EXPECT_NE(findChange(result, 2), nullptr);
+    EXPECT_NE(findChange(result, 3), nullptr);
+}
+
+TEST(MatchingEngineTest, ExecutionResultMarketBranchReportsChanges) {
+    MatchingEngine engine;
+    engine.process(makeAdd(1, Side::Sell, 100, 5));
+
+    auto result = engine.process(marketBuy(2, Side::Buy, 5));
+
+    ASSERT_EQ(result.trades.size(), 1u);
+    EXPECT_FALSE(result.orderChanges.empty());
+
+    const auto* marketChange = findChange(result, 2);
+    ASSERT_NE(marketChange, nullptr);
+    EXPECT_FALSE(marketChange->price.has_value());
+    EXPECT_EQ(marketChange->status, OrderStatus::Filled);
+}
+
+TEST(MatchingEngineTest, ExecutionResultMarketPartiallyFilledIsCancelled) {
+    MatchingEngine engine;
+    // В книге меньше ликвидности, чем нужно рыночной заявке
+    engine.process(makeAdd(1, Side::Sell, 100, 3));
+
+    auto result = engine.process(marketBuy(2, Side::Buy, 10));
+
+    const auto* marketChange = findChange(result, 2);
+    ASSERT_NE(marketChange, nullptr);
+    EXPECT_EQ(marketChange->status, OrderStatus::Cancelled);
+    EXPECT_EQ(marketChange->remainingQuantity, 7);
+}
+
+TEST(MatchingEngineTest, ExecutionResultMarketNoLiquidityIsCancelled) {
+    MatchingEngine engine;
+    auto result = engine.process(marketBuy(1, Side::Buy, 10));
+
+    ASSERT_EQ(result.orderChanges.size(), 1u);
+    EXPECT_EQ(result.orderChanges[0].status, OrderStatus::Cancelled);
+    EXPECT_EQ(result.orderChanges[0].remainingQuantity, 10);
+}
+
+TEST(MatchingEngineTest, ExecutionResultCancelStatusIsCancelled) {
+    MatchingEngine engine;
+    engine.process(makeAdd(1, Side::Buy, 100, 10));
+    auto result = engine.process(makeCancel(1));
+
+    ASSERT_EQ(result.orderChanges.size(), 1u);
+    EXPECT_EQ(result.orderChanges[0].id, 1);
+    EXPECT_EQ(result.orderChanges[0].status, OrderStatus::Cancelled);
+}
+
+TEST(MatchingEngineTest, ExecutionResultModifyPreservesOldSnapshot) {
+    MatchingEngine engine;
+    auto addResult = engine.process(makeAdd(1, Side::Buy, 100, 10));
+    ASSERT_EQ(addResult.orderChanges.size(), 1u);
+    const int originalInitialQuantity = addResult.orderChanges[0].initialQuantity;
+    const long long originalSequenceNumber = addResult.orderChanges[0].sequenceNumber;
+
+    ModifyCommand modCmd(1, 110, 5);
+    auto result = engine.process(modCmd);
+
+    // Старый снимок — первым, снят до удаления старого объекта из книги
+    ASSERT_GE(result.orderChanges.size(), 2u);
+    const auto& oldSnapshot = result.orderChanges.front();
+    EXPECT_EQ(oldSnapshot.id, 1);
+    EXPECT_EQ(oldSnapshot.initialQuantity, originalInitialQuantity);
+    EXPECT_EQ(oldSnapshot.sequenceNumber, originalSequenceNumber);
+
+    // Новый снимок — своё исходное количество и новый номер, приоритет потерян
+    const auto& newSnapshot = result.orderChanges.back();
+    EXPECT_EQ(newSnapshot.initialQuantity, 5);
+    EXPECT_NE(newSnapshot.sequenceNumber, originalSequenceNumber);
+}
+
+// ─── Восстановление в книге (REQ-REC-04) ─────────────────────────────────────
+
+TEST(MatchingEngineTest, RestoreDoesNotCreateTradesEvenWithCrossingOrder) {
+    MatchingEngine engine;
+    engine.restore(std::make_shared<Order>(1, Side::Sell, 100, 10, 10, 1, OrderStatus::Open));
+    engine.restore(std::make_shared<Order>(2, Side::Buy, 150, 5, 5, 2, OrderStatus::Open));
+
+    EXPECT_TRUE(engine.trades().empty());
+
+    auto sell = engine.orderBook().findOrder(1);
+    auto buy  = engine.orderBook().findOrder(2);
+    ASSERT_NE(sell, nullptr);
+    ASSERT_NE(buy, nullptr);
+    EXPECT_EQ(sell->getQuantity(), 10);
+    EXPECT_EQ(buy->getQuantity(), 5);
+}
+
+TEST(MatchingEngineTest, RestoredOrdersMatchedInSequenceOrder) {
+    MatchingEngine engine;
+    engine.restore(std::make_shared<Order>(10, Side::Buy, 100, 2, 2, 1, OrderStatus::Open));
+    engine.restore(std::make_shared<Order>(20, Side::Buy, 100, 3, 3, 2, OrderStatus::Open));
+    engine.restore(std::make_shared<Order>(30, Side::Buy, 100, 4, 4, 3, OrderStatus::Open));
+
+    engine.process(makeAdd(40, Side::Sell, 100, 9));
+
+    const auto& trades = engine.trades();
+    ASSERT_EQ(trades.size(), 3u);
+    EXPECT_EQ(trades[0].getBuyOrderId(), 10);
+    EXPECT_EQ(trades[1].getBuyOrderId(), 20);
+    EXPECT_EQ(trades[2].getBuyOrderId(), 30);
+}

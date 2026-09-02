@@ -19,6 +19,14 @@ void OrderBook::addOrder(std::shared_ptr<Order> order){
     }
 }
 
+void OrderBook::restore(std::shared_ptr<Order> order){
+    // Та же мутация обеих внутренних структур, что и addOrder — здесь нет
+    // отдельного алгоритма, единственная разница в намерении вызывающего
+    // кода: заявка уже стояла в книге до перезапуска и сопоставлению не
+    // подлежит.
+    addOrder(order);
+}
+
 void OrderBook::removeFromLevels(
     std::map<int, std::deque<std::shared_ptr<Order>>>& levels,
     int price,

@@ -11,6 +11,7 @@ public:
     void info(const std::string& messaage);
     void warning(const std::string& message);
     void error(const std::string& message);
+    void debug(const std::string& message);
 
     Logger(const Logger&) = delete;
     Logger& operator=(const Logger&) = delete;

@@ -35,4 +35,29 @@ public:
         : MatchingEngineError(message) {}
 };
 
+class DatabaseError : public MatchingEngineError{
+public:
+    explicit DatabaseError(const std::string& message)
+        : MatchingEngineError(message) {}
+};
+
+class ConfigError : public MatchingEngineError{
+public:
+    explicit ConfigError(const std::string& message)
+        : MatchingEngineError(message) {}
+};
+
+// Сбой сохранения результата команды в БД (задача 07, REQ-TX-03). Наследует
+// MatchingEngineError по конвенции проекта, поэтому Application::processCommand
+// обязан перехватывать его раньше generic catch(const MatchingEngineError&) и
+// пробрасывать наверх — иначе тот перехват проглотит его как обычную
+// командную ошибку. К моменту, когда это исключение долетает наружу, книга
+// заявок в памяти уже изменена, а запись в БД не удалась: продолжать работу
+// нельзя, только аварийно (но штатно, без std::terminate) завершить процесс.
+class PersistenceError : public MatchingEngineError{
+public:
+    explicit PersistenceError(const std::string& message)
+        : MatchingEngineError(message) {}
+};
+
 }
