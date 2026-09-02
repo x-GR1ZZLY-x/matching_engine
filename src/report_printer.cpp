@@ -39,6 +39,11 @@ void ReportPrinter::printError(const std::string& message) const{
     std::cout.flush();
 }
 
+void ReportPrinter::printUsage(const std::string& usage) const{
+    std::cerr << usage;
+    std::cout.flush();
+}
+
 void ReportPrinter::printReplaySummary(long long processedCommands, long long trades,
     long long duplicates, long long skippedLines, std::chrono::milliseconds elapsed) const{
     std::cout << "REPLAY SUMMARY\n"

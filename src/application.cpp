@@ -49,6 +49,19 @@ std::string describeSchemaFailure(const std::string& schemaDir){
         "Check that the directory exists, is readable, and contains valid SQL "
         "files; details are in the log.";
 }
+
+// Человеческое сообщение для сбоя сохранения (PersistenceError): книга в
+// памяти уже изменена, а в БД — нет, поэтому процесс завершается (fail-fast,
+// docs/plan.md, "Обработка ошибок: два разных класса"). Симметрично двум
+// сообщениям выше: сырой текст драйвера/сервера, пришедший в e.what() через
+// PersistenceService -> DatabaseError -> PQerrorMessage/PQresultErrorMessage,
+// уходит только в отладочный лог, а не в это сообщение — иначе имена таблиц,
+// колонок и фрагменты SQL утекали бы пользователю через ERROR:.
+std::string describePersistenceFailure(){
+    return "Failed to save results to the database, aborting. The in-memory "
+        "order book may no longer match the database, so the process cannot "
+        "continue safely; details are in the log.";
+}
 }
 
 bool Application::parseArgs(int argc, char** argv, std::string& configPath,
@@ -122,7 +135,7 @@ int Application::run(int argc, char** argv){
     std::string parseError;
     if(!parseArgs(argc, argv, configPath, jsonArg, replayPath, batch, parseError)){
         if(parseError == kUsage){
-            std::cerr << parseError;
+            printer_.printUsage(parseError);
         } else {
             printer_.printError(parseError);
         }
@@ -188,9 +201,9 @@ int Application::run(int argc, char** argv){
         try{
             replayOk = runReplay(replayPath, *connection, batch);
         } catch(const PersistenceError& e){
-            Logger::instance().error(std::string("Persistence error: ") + e.what());
-            printer_.printError(std::string("Failed to save results to the database, "
-                "aborting: ") + e.what());
+            Logger::instance().error(describePersistenceFailure());
+            Logger::instance().debug(std::string("Persistence error: ") + e.what());
+            printer_.printError(describePersistenceFailure());
             return 1;
         }
         if(!replayOk){
@@ -234,9 +247,9 @@ int Application::run(int argc, char** argv){
             processCommand(commandJson, *connection, /*printTrades=*/true, /*batch=*/false);
         }
     } catch(const PersistenceError& e){
-        Logger::instance().error(std::string("Persistence error: ") + e.what());
-        printer_.printError(std::string("Failed to save results to the database, "
-            "aborting: ") + e.what());
+        Logger::instance().error(describePersistenceFailure());
+        Logger::instance().debug(std::string("Persistence error: ") + e.what());
+        printer_.printError(describePersistenceFailure());
         return 1;
     }
 

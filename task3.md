@@ -117,5 +117,5 @@
 |---|---|---|
 | REQ-DOC-01 | README дополнен разделами: Persistence, Database schema, Transactions, Crash consistency, Idempotency, Cache, Recovery, RAII wrapper, Performance | ГОТОВО |
 | REQ-DOC-02 | В README раскрыто: зачем нужны транзакции и что произойдёт при падении посреди обработки заявки; зачем нужен `command_id` и что произойдёт при повторной отправке команды; как происходит восстановление; почему две заявки с одинаковой ценой не меняются местами после рестарта; какие индексы выбраны и почему | ГОТОВО |
-| REQ-DOC-03 | Отдельная ветка для ДЗ и Pull Request по завершении | TODO |
-| REQ-DOC-04 | История коммитов в стиле Conventional Commits | TODO |
+| REQ-DOC-03 | Отдельная ветка для ДЗ и Pull Request по завершении | ГОТОВО (ветка; PR создаёт человек) |
+| REQ-DOC-04 | История коммитов в стиле Conventional Commits | ГОТОВО |
