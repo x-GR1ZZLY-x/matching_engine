@@ -57,6 +57,7 @@ add_library(
     src/command_processor.cpp
     src/recovery_service.cpp
     src/cli_args.cpp
+    src/message_codec.cpp
 )
 
 target_include_directories(
@@ -128,6 +129,7 @@ add_executable(
     tests/command_cache_tests.cpp
     tests/command_processor_tests.cpp
     tests/integration_tests.cpp
+    tests/message_codec_tests.cpp
 )
 
 target_include_directories(

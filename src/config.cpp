@@ -1,7 +1,9 @@
 #include"config.hpp"
 #include"exceptions.hpp"
+#include<cstdint>
 #include<cstdlib>
 #include<fstream>
+#include<limits>
 #include<string>
 #include<nlohmann/json.hpp>
 
@@ -67,6 +69,24 @@ int requirePort(const nlohmann::json& section, const std::string& sectionName,
     return static_cast<int>(value);
 }
 
+// max_message_size ограничивает длину полезной нагрузки, которую
+// MessageCodec::decodeHeader разбирает в uint32_t заголовка. Ноль запретил
+// бы любое непустое сообщение, а значение больше UINT32_MAX не отловится ни
+// при каком заголовке (заголовок сам не может объявить больше UINT32_MAX) и
+// тихо снимет защиту от заявленного гиганта.
+std::size_t requireMaxMessageSize(const nlohmann::json& section, const std::string& sectionName,
+    const std::string& field, const std::string& configPath){
+
+    const long long value = requireNonNegativeInt(section, sectionName, field, configPath);
+    constexpr long long maxAllowed =
+        static_cast<long long>(std::numeric_limits<std::uint32_t>::max());
+    if(value < 1 || value > maxAllowed){
+        throw ConfigError("Config file '" + configPath + "' field '" + sectionName + "." +
+            field + "' must be between 1 and " + std::to_string(maxAllowed));
+    }
+    return static_cast<std::size_t>(value);
+}
+
 }
 
 AppConfig loadConfig(const std::string& configPath){
@@ -92,8 +112,8 @@ AppConfig loadConfig(const std::string& configPath){
     AppConfig config;
     config.server.address = requireString(serverSection, "server", "address", configPath);
     config.server.port = requirePort(serverSection, "server", "port", configPath);
-    config.server.maxMessageSize = static_cast<std::size_t>(
-        requireNonNegativeInt(serverSection, "server", "max_message_size", configPath));
+    config.server.maxMessageSize =
+        requireMaxMessageSize(serverSection, "server", "max_message_size", configPath);
 
     config.database.host = requireString(databaseSection, "database", "host", configPath);
     config.database.port = std::to_string(

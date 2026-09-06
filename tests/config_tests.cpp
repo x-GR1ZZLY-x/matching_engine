@@ -1,7 +1,9 @@
 #include<gtest/gtest.h>
+#include<cstdint>
 #include<cstdlib>
 #include<filesystem>
 #include<fstream>
+#include<limits>
 #include<string>
 #include"config.hpp"
 #include"exceptions.hpp"
@@ -249,4 +251,72 @@ TEST(ConfigTest, ZeroPortIsAccepted){
     const AppConfig config = loadConfig(tempFile.path());
 
     EXPECT_EQ(config.server.port, 0);
+}
+
+// Ноль запретил бы любое непустое сообщение — max_message_size обязан быть
+// не меньше единицы.
+TEST(ConfigTest, ZeroMaxMessageSizeThrowsConfigError){
+    const ScopedTempFile tempFile("zero_max_message_size", R"({
+        "server": {
+            "address": "0.0.0.0",
+            "port": 9000,
+            "max_message_size": 0
+        },
+        "database": {
+            "host": "db.example.test",
+            "port": 6543,
+            "name": "some_db",
+            "user": "some_user"
+        }
+    })");
+    ScopedEnv env("MATCHING_ENGINE_DB_PASSWORD", "s3cret");
+
+    EXPECT_THROW(loadConfig(tempFile.path()), ConfigError);
+}
+
+// Значение больше UINT32_MAX не отловится decodeHeader ни при каком
+// заголовке (заголовок сам не может объявить больше UINT32_MAX) и тихо
+// снимет защиту от заявленного гиганта — конфигурация обязана отвергнуть
+// такое значение сама.
+TEST(ConfigTest, MaxMessageSizeAboveUint32MaxThrowsConfigError){
+    const ScopedTempFile tempFile("max_message_size_above_uint32_max", R"({
+        "server": {
+            "address": "0.0.0.0",
+            "port": 9000,
+            "max_message_size": 4294967296
+        },
+        "database": {
+            "host": "db.example.test",
+            "port": 6543,
+            "name": "some_db",
+            "user": "some_user"
+        }
+    })");
+    ScopedEnv env("MATCHING_ENGINE_DB_PASSWORD", "s3cret");
+
+    EXPECT_THROW(loadConfig(tempFile.path()), ConfigError);
+}
+
+// Граничное значение, равное UINT32_MAX, — законный максимум и обязано
+// приниматься, а не отвергаться вместе со значениями выше предела.
+TEST(ConfigTest, MaxMessageSizeAtUint32MaxIsAccepted){
+    const ScopedTempFile tempFile("max_message_size_at_uint32_max", R"({
+        "server": {
+            "address": "0.0.0.0",
+            "port": 9000,
+            "max_message_size": 4294967295
+        },
+        "database": {
+            "host": "db.example.test",
+            "port": 6543,
+            "name": "some_db",
+            "user": "some_user"
+        }
+    })");
+    ScopedEnv env("MATCHING_ENGINE_DB_PASSWORD", "s3cret");
+
+    const AppConfig config = loadConfig(tempFile.path());
+
+    EXPECT_EQ(config.server.maxMessageSize,
+        static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()));
 }
