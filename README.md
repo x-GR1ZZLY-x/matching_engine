@@ -98,7 +98,7 @@ main()
         │
         ├─► RecoveryService     восстановление книги, счётчика и кеша при старте
         │
-        ├─► DatabaseConfig      конфигурация подключения (файл + переменная окружения)
+        ├─► AppConfig           конфигурация сервера и БД (файл + переменная окружения)
         │
         ├─► ReportPrinter       единственный класс, пишущий в stdout
         │
@@ -122,7 +122,7 @@ main()
 | `PersistenceService` | Единственный класс, где создаётся `PgTransaction`; сохраняет заявки, затем сделки, затем запись о команде — одной транзакцией (штатно) или пакетом (`--batch`) |
 | `OrderRepository` / `TradeRepository` / `CommandRepository` | SQL для таблиц `orders`, `trades`, `processed_commands`; соединение получают параметром, не хранят |
 | `PgConnection` / `PgResult` / `PgTransaction` | RAII-обёртка над libpq |
-| `DatabaseConfig` / `loadDatabaseConfig` | Конфигурация подключения к БД |
+| `AppConfig` / `ServerConfig` / `DatabaseConfig` / `loadConfig` | Единый формат конфигурации: секции `server` и `database` |
 | `RecoveryService` (`recoverState`) | Восстановление книги, счётчика номеров заявок и кеша идемпотентности при старте |
 | `SequenceGenerator` | Монотонный счётчик номеров заявок |
 | `ReportPrinter` | Выводит сделки, состояние книги и ошибки |
@@ -255,7 +255,7 @@ cmake --build build
 
 ## Запуск
 
-Для запуска нужен доступный сервер PostgreSQL: при старте приложение подключается к нему и само создаёт схему (таблицы и индексы) из файлов каталога `database/`, вручную создавать таблицы через `psql` не нужно. Параметры подключения (хост, порт, имя базы, пользователь) берутся из `config/database.json` (образец без пароля — `config/database.example.json`), путь переопределяется ключом `--config`. Пароль передаётся только через переменную окружения `MATCHING_ENGINE_DB_PASSWORD` и в файлы конфигурации не попадает.
+Для запуска нужен доступный сервер PostgreSQL: при старте приложение подключается к нему и само создаёт схему (таблицы и индексы) из файлов каталога `database/`, вручную создавать таблицы через `psql` не нужно. Параметры подключения (хост, порт, имя базы, пользователь) берутся из секции `database` файла `config/config.json` (образец без пароля — `config/config.example.json`), путь переопределяется ключом `--config`. Пароль передаётся только через переменную окружения `MATCHING_ENGINE_DB_PASSWORD` и в файлы конфигурации не попадает.
 
 ```bash
 ./build/matching_engine '<json>'
@@ -667,7 +667,7 @@ cmake --build build --target memcheck
 psql -h <host> -p <port> -U <user> -d <database> -c "TRUNCATE orders, trades, processed_commands"
 ```
 
-Хост, порт, имя базы и пользователя подставляются из вашей конфигурации (`config/database.json`, образец — `config/database.example.json`); в этом файле они не приводятся намеренно.
+Хост, порт, имя базы и пользователя подставляются из секции `database` вашей конфигурации (`config/config.json`, образец — `config/config.example.json`); в этом файле они не приводятся намеренно.
 
 Это обязательно: `workload.jsonl` каждый раз несёт одни и те же `command_id`, и непустая база после предыдущего прогона превращает измерение в замер идемпотентного кеша, а не движка.
 

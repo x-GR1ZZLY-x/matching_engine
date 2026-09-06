@@ -31,7 +31,7 @@ TEST(ApplicationParseArgsTest, DefaultConfigPathWhenNoConfigOption){
         error);
 
     EXPECT_TRUE(ok);
-    EXPECT_EQ(configPath, "config/database.json");
+    EXPECT_EQ(configPath, "config/config.json");
     EXPECT_EQ(jsonArg, "{\"commands\":[]}");
     EXPECT_TRUE(replayPath.empty());
     EXPECT_FALSE(batch);

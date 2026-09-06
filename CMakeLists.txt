@@ -30,6 +30,8 @@ FetchContent_MakeAvailable(
     spdlog)
 
 find_package(PostgreSQL REQUIRED)
+find_package(Boost REQUIRED)
+find_package(Threads REQUIRED)
 
 add_library(
     matching_engine_lib
@@ -44,7 +46,7 @@ add_library(
     src/pg_connection.cpp
     src/pg_result.cpp
     src/pg_transaction.cpp
-    src/database_config.cpp
+    src/config.cpp
     src/schema.cpp
     src/sequence_generator.cpp
     src/order_repository.cpp
@@ -54,6 +56,7 @@ add_library(
     src/persistence_service.cpp
     src/command_processor.cpp
     src/recovery_service.cpp
+    src/cli_args.cpp
 )
 
 target_include_directories(
@@ -68,6 +71,8 @@ target_link_libraries(
     nlohmann_json::nlohmann_json
     spdlog::spdlog
     PostgreSQL::PostgreSQL
+    Boost::boost
+    Threads::Threads
 )
 
 add_executable(
@@ -81,6 +86,28 @@ target_link_libraries(
     matching_engine_lib
 )
 
+add_executable(
+    matching-engine-server
+    src/server_main.cpp
+)
+
+target_link_libraries(
+    matching-engine-server
+    PRIVATE
+    matching_engine_lib
+)
+
+add_executable(
+    matching-engine-client
+    src/client_main.cpp
+)
+
+target_link_libraries(
+    matching-engine-client
+    PRIVATE
+    matching_engine_lib
+)
+
 enable_testing()
 
 add_executable(
@@ -90,8 +117,9 @@ add_executable(
     tests/order_book_tests.cpp
     tests/matching_engine_tests.cpp
     tests/pg_wrapper_tests.cpp
-    tests/database_config_tests.cpp
+    tests/config_tests.cpp
     tests/application_tests.cpp
+    tests/cli_args_tests.cpp
     tests/schema_tests.cpp
     tests/sequence_generator_tests.cpp
     tests/order_repository_tests.cpp

@@ -2,7 +2,7 @@
 
 // Общий помощник для интеграционных тестов, требующих реальной БД.
 // Параметры подключения берутся из конфигурации приложения (см.
-// database_config.hpp), а не из строковых литералов — иначе хост, имя базы
+// config.hpp), а не из строковых литералов — иначе хост, имя базы
 // и пользователь оседали бы в исходниках тестов.
 
 #include<gtest/gtest.h>
@@ -10,7 +10,7 @@
 #include<fstream>
 #include<optional>
 #include<string>
-#include"database_config.hpp"
+#include"config.hpp"
 #include"exceptions.hpp"
 #include"pg_connection.hpp"
 
@@ -25,7 +25,7 @@ inline std::string g_lastConnectFailure = "БД ещё не проверялас
 // build/, поэтому путь строится от MATCHING_ENGINE_SOURCE_DIR, а не
 // относительно текущего каталога.
 inline std::string configPath(){
-    return std::string(MATCHING_ENGINE_SOURCE_DIR) + "/config/database.json";
+    return std::string(MATCHING_ENGINE_SOURCE_DIR) + "/config/config.json";
 }
 
 // Пытается подключиться к тестовой базе, используя конфигурацию приложения
@@ -36,13 +36,13 @@ inline std::optional<PgConnection> tryConnect(){
     // Два законных повода пропустить тест — нет файла конфигурации и не задан
     // пароль, то есть машина без локальной настройки БД. Оба проверяются
     // здесь напрямую, до разбора конфигурации. Всё остальное, чем может
-    // ответить loadDatabaseConfig (невалидный JSON, отсутствующее или
-    // нестроковое поле в существующем файле), — ошибка конфигурации, а не
-    // недоступность базы: такую поломку GTEST_SKIP() маскировать не должен,
-    // иначе опечатка в одном поле молча уводит в пропуск все тесты,
-    // требующие БД, и ctest возвращает успех, ничего не проверив.
+    // ответить loadConfig (невалидный JSON, отсутствующая секция или поле
+    // в существующем файле), — ошибка конфигурации, а не недоступность
+    // базы: такую поломку GTEST_SKIP() маскировать не должен, иначе
+    // опечатка в одном поле молча уводит в пропуск все тесты, требующие БД,
+    // и ctest возвращает успех, ничего не проверив.
     // Проверки именно прямые, а не по тексту сообщения ConfigError:
-    // формулировки принадлежат database_config.cpp и вольны меняться, а
+    // формулировки принадлежат config.cpp и вольны меняться, а
     // ценой такой связи был бы молчаливый пропуск всего слоя персистентности.
     {
         std::ifstream configFile(configPath());
@@ -58,7 +58,7 @@ inline std::optional<PgConnection> tryConnect(){
         return std::nullopt;
     }
 
-    const DatabaseConfig config = loadDatabaseConfig(configPath());
+    const DatabaseConfig config = loadConfig(configPath()).database;
 
     try{
         return PgConnection(config.host, config.port, config.dbname,

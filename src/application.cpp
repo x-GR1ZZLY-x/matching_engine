@@ -7,14 +7,14 @@
 #include"logger.hpp"
 #include"exceptions.hpp"
 #include"pg_connection.hpp"
-#include"database_config.hpp"
+#include"config.hpp"
 #include"recovery_service.hpp"
 #include"schema.hpp"
 
 namespace matching_engine{
 
 namespace{
-constexpr const char* kDefaultConfigPath = "config/database.json";
+constexpr const char* kDefaultConfigPath = "config/config.json";
 constexpr const char* kSchemaDir = "database";
 constexpr const char* kUsage =
     "Usage: matching_engine [--config <path>] '<json>'\n"
@@ -142,14 +142,15 @@ int Application::run(int argc, char** argv){
         return 1;
     }
 
-    DatabaseConfig config;
+    AppConfig appConfig;
     try{
-        config = loadDatabaseConfig(configPath);
+        appConfig = loadConfig(configPath);
     } catch(const ConfigError& e){
         Logger::instance().error(std::string("Config error: ") + e.what());
         printer_.printError(e.what());
         return 1;
     }
+    const DatabaseConfig& config = appConfig.database;
 
     // Соединение открывается один раз здесь и живёт до конца run() —
     // весь жизненный цикл приложения. Освобождается деструктором PgConnection
