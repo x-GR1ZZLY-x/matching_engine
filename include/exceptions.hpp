@@ -78,4 +78,28 @@ public:
         : MatchingEngineError(message) {}
 };
 
+// Ошибка клиентской стороны сетевого протокола (задача 04, REQ-CLI-04):
+// не удалось подключиться, операция чтения/записи завершилась ошибкой или
+// разрывом соединения, либо истёк таймаут ожидания. Наследует
+// MatchingEngineError по конвенции проекта. Бросается только классом
+// Client — сервер о ней не знает, у него симметричный, но отдельный путь
+// ошибок (MessageTooLargeError и обычные ответы со статусом ERROR).
+class NetworkError : public MatchingEngineError{
+public:
+    explicit NetworkError(const std::string& message)
+        : MatchingEngineError(message) {}
+};
+
+// Частный случай NetworkError: операция не завершилась не потому, что
+// соединение оборвалось, а потому что истёк клиентский таймаут ожидания
+// (задача 04). Отличать эти два случая по типу нужно там, где обрыв
+// соединения и молчание сервера должны проверяться по-разному — например,
+// в тесте на MESSAGE_TOO_LARGE, где важно убедиться именно в закрытии
+// соединения, а не в том, что сервер просто не ответил вовремя.
+class NetworkTimeoutError : public NetworkError{
+public:
+    explicit NetworkTimeoutError(const std::string& message)
+        : NetworkError(message) {}
+};
+
 }

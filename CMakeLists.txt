@@ -58,6 +58,10 @@ add_library(
     src/recovery_service.cpp
     src/cli_args.cpp
     src/message_codec.cpp
+    src/request_router.cpp
+    src/session.cpp
+    src/server.cpp
+    src/client.cpp
 )
 
 target_include_directories(
@@ -130,6 +134,8 @@ add_executable(
     tests/command_processor_tests.cpp
     tests/integration_tests.cpp
     tests/message_codec_tests.cpp
+    tests/request_router_tests.cpp
+    tests/network_tests.cpp
 )
 
 target_include_directories(
