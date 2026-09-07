@@ -88,7 +88,8 @@ constexpr const char* kValidConfig = R"({
         "host": "db.example.test",
         "port": 6543,
         "name": "some_db",
-        "user": "some_user"
+        "user": "some_user",
+        "schema_dir": "database"
     }
 })";
 
@@ -109,6 +110,7 @@ TEST(ConfigTest, LoadsValidConfigWithPasswordFromEnv){
     EXPECT_EQ(config.database.dbname, "some_db");
     EXPECT_EQ(config.database.user, "some_user");
     EXPECT_EQ(config.database.password, "s3cret");
+    EXPECT_EQ(config.database.schemaDir, "database");
 }
 
 TEST(ConfigTest, MissingFileThrowsConfigError){
@@ -172,6 +174,39 @@ TEST(ConfigTest, MissingRequiredFieldThrowsConfigError){
         FAIL() << "loadConfig must throw when a required field is missing";
     } catch(const ConfigError& e){
         EXPECT_NE(std::string(e.what()).find("database.user"), std::string::npos);
+    }
+}
+
+// Путь к каталогу схемы обязателен в секции "database": под управлением
+// службы рабочий каталог не совпадает с каталогом сборки, поэтому
+// относительный путь в коде не годится. Отсутствие поля даёт внятную ошибку
+// из иерархии MatchingEngineError (ConfigError), а не падение или
+// неопределённое поведение при последующей попытке применить схему по
+// пустому пути.
+TEST(ConfigTest, MissingSchemaDirThrowsConfigError){
+    const ScopedTempFile tempFile("missing_schema_dir", R"({
+        "server": {
+            "address": "0.0.0.0",
+            "port": 9000,
+            "max_message_size": 1048576
+        },
+        "database": {
+            "host": "db.example.test",
+            "port": 6543,
+            "name": "some_db",
+            "user": "some_user"
+        }
+    })");
+    ScopedEnv env("MATCHING_ENGINE_DB_PASSWORD", "s3cret");
+
+    try{
+        loadConfig(tempFile.path());
+        FAIL() << "loadConfig must throw when database.schema_dir is missing";
+    } catch(const ConfigError& e){
+        EXPECT_NE(std::string(e.what()).find("database.schema_dir"), std::string::npos);
+    } catch(const MatchingEngineError&){
+        FAIL() << "loadConfig must throw ConfigError specifically, not another "
+            "MatchingEngineError subtype";
     }
 }
 
@@ -243,7 +278,8 @@ TEST(ConfigTest, ZeroPortIsAccepted){
             "host": "db.example.test",
             "port": 6543,
             "name": "some_db",
-            "user": "some_user"
+            "user": "some_user",
+            "schema_dir": "database"
         }
     })");
     ScopedEnv env("MATCHING_ENGINE_DB_PASSWORD", "s3cret");
@@ -310,7 +346,8 @@ TEST(ConfigTest, MaxMessageSizeAtUint32MaxIsAccepted){
             "host": "db.example.test",
             "port": 6543,
             "name": "some_db",
-            "user": "some_user"
+            "user": "some_user",
+            "schema_dir": "database"
         }
     })");
     ScopedEnv env("MATCHING_ENGINE_DB_PASSWORD", "s3cret");

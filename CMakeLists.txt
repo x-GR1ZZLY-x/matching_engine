@@ -58,6 +58,7 @@ add_library(
     src/recovery_service.cpp
     src/cli_args.cpp
     src/message_codec.cpp
+    src/response_serializer.cpp
     src/request_router.cpp
     src/session.cpp
     src/server.cpp

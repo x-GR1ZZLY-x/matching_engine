@@ -35,8 +35,9 @@ public:
     // об этих шагах не знает и никак их не проверяет.
     void start();
 
-    // Безопасен для вызова из другого потока (сигнальный поток задачи 08,
-    // поток теста, крутящий io_context сервера): закрытие acceptor'а
+    // Безопасен для вызова из другого потока (сигнальный поток,
+    // обрабатывающий SIGTERM/SIGINT согласно REQ-THR-04, поток теста,
+    // крутящий io_context сервера): закрытие acceptor'а
     // переносится в io_context через post, а не выполняется напрямую —
     // acceptor не потокобезопасен сам по себе, но post в его собственный
     // io_context is thread-safe по контракту Asio.
@@ -47,8 +48,21 @@ public:
     // только после bind().
     unsigned short port() const noexcept { return port_; }
 
+    // Взводится, когда одна из сессий сообщила о сбое сохранения в БД
+    // (PersistenceError, docs/task4/02-network-protocol.md, раздел 3.5):
+    // книга в памяти разошлась с хранилищем, поэтому вызывающая сторона
+    // (server_main.cpp) обязана завершить процесс с кодом 1 после того,
+    // как io_context.run() вернётся.
+    bool hadFatalError() const noexcept { return fatalError_; }
+
 private:
     void doAccept();
+
+    // Тело обработчика async_accept: вынесено из лямбды doAccept() отдельным
+    // методом, чтобы сама лямбда оставалась короткой и не прятала внутри
+    // себя ветвление, от которого зависит взведение onFatalShutdown (см.
+    // ниже). Вызывается только из doAccept().
+    void handleAccept(boost::system::error_code ec, boost::asio::ip::tcp::socket socket);
 
     boost::asio::io_context& ioContext_;
     boost::asio::ip::tcp::acceptor acceptor_;
@@ -56,11 +70,12 @@ private:
     RequestRouter& router_;
     std::string address_;
     unsigned short port_ = 0;
+    bool fatalError_ = false;
 
     // Реестр живых сессий слабыми ссылками (REQ-NET-08): на время жизни
     // сессий не влияет (только shared_from_this() в самой Session
-    // управляет им), нужен будущему graceful shutdown задачи 08/11, чтобы
-    // достучаться до активных соединений при остановке сервера.
+    // управляет им), нужен будущему graceful drain (REQ-THR-11, REQ-EXT-08),
+    // чтобы достучаться до активных соединений при остановке сервера.
     std::vector<std::weak_ptr<Session>> sessions_;
 };
 

@@ -35,6 +35,20 @@ std::string CommandParser::requireString(
         return value.get<std::string>();
 }
 
+int CommandParser::requireOrderId(const nlohmann::json& j) const {
+    if (j.contains("order_id")) {
+        return requireInt(j, "order_id");
+    }
+    if (j.contains("id")) {
+        return requireInt(j, "id");
+    }
+    // Сетевой API документирует "order_id" (REQ-API-10); "id" — принимаемый
+    // синоним из консольного режима прошлых работ, а не имя, которое видит
+    // клиент. Когда не пришло ни одно из двух полей, сообщение об ошибке
+    // называет документированное имя, а не внутренний синоним.
+    throw ParseError("Missed required field: order_id");
+}
+
 std::unique_ptr<Command> CommandParser::parseAdd(const nlohmann::json& j) const {
     if (j.contains("order_type")) {
         const std::string orderType = requireString(j, "order_type");
@@ -44,7 +58,7 @@ std::unique_ptr<Command> CommandParser::parseAdd(const nlohmann::json& j) const 
         throw ParseError("Unknown order_type: " + orderType);
     }
 
-    const int id = requireInt(j, "id");
+    const int id = requireOrderId(j);
     const std::string sideStr = requireString(j, "side");
     const int price = requireInt(j, "price");
     const int quantity = requireInt(j, "quantity");
@@ -53,23 +67,27 @@ std::unique_ptr<Command> CommandParser::parseAdd(const nlohmann::json& j) const 
     try{
         side = Order::sideFromString(sideStr);
     } catch (const OrderError& e){
-        throw ParseError(std::string("Invalid side value: ") + e.what());
+        throw InvalidOrderValueError(std::string("Invalid side value: ") + e.what());
     }
 
+    // Осознанно оставлено ParseError/INVALID_REQUEST, а не
+    // InvalidOrderValueError/INVALID_ORDER: таблица раздела 3.5 контракта
+    // перечисляет под INVALID_ORDER только цену, количество и сторону —
+    // идентификатор заявки в этот список не входит.
     if(id <= 0){
         throw ParseError("Id must be positive");
     }
     if(price <= 0){
-        throw ParseError("Price must be positive");
+        throw InvalidOrderValueError("Price must be positive");
     }
     if(quantity <= 0){
-        throw ParseError("Quantity must be positive");
+        throw InvalidOrderValueError("Quantity must be positive");
     }
     return std::make_unique<AddCommand>(id, side, price, quantity);
 }
 
 std::unique_ptr<Command> CommandParser::parseCancel(const nlohmann::json& j) const{
-    const int id = requireInt(j, "id");
+    const int id = requireOrderId(j);
     if(id <= 0) {
         throw ParseError("Id must be positive");
     }
@@ -96,7 +114,7 @@ std::unique_ptr<Command> CommandParser::parse(const nlohmann::json& j) const{
 }
 
 std::unique_ptr<Command> CommandParser::parseMarketAdd(const nlohmann::json& j) const {
-    const int id = requireInt(j, "id");
+    const int id = requireOrderId(j);
     const std::string sideStr = requireString(j, "side");
     const int quantity = requireInt(j, "quantity");
 
@@ -104,23 +122,23 @@ std::unique_ptr<Command> CommandParser::parseMarketAdd(const nlohmann::json& j) 
     try {
         side = Order::sideFromString(sideStr);
     } catch (const OrderError& e) {
-        throw ParseError(std::string("Invalid side value: ") + e.what());
+        throw InvalidOrderValueError(std::string("Invalid side value: ") + e.what());
     }
 
     if (id <= 0)       throw ParseError("Id must be positive");
-    if (quantity <= 0) throw ParseError("Quantity must be positive");
+    if (quantity <= 0) throw InvalidOrderValueError("Quantity must be positive");
 
     return std::make_unique<MarketAddCommand>(id, side, quantity);
 }
 
 std::unique_ptr<Command> CommandParser::parseModify(const nlohmann::json& j) const {
-    const int id       = requireInt(j, "id");
+    const int id       = requireOrderId(j);
     const int price    = requireInt(j, "price");
     const int quantity = requireInt(j, "quantity");
 
     if (id <= 0)       throw ParseError("Id must be positive");
-    if (price <= 0)    throw ParseError("Price must be positive");
-    if (quantity <= 0) throw ParseError("Quantity must be positive");
+    if (price <= 0)    throw InvalidOrderValueError("Price must be positive");
+    if (quantity <= 0) throw InvalidOrderValueError("Quantity must be positive");
 
     return std::make_unique<ModifyCommand>(id, price, quantity);
 }

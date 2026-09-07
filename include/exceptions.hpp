@@ -23,6 +23,20 @@ public:
         : MatchingEngineError(message) {}
 };
 
+// Значение не проходит проверку предметной области (задача 05, код
+// INVALID_ORDER, docs/task4/02-network-protocol.md, раздел 3.5):
+// неположительная цена или количество, неизвестная сторона. Наследует
+// ParseError (а не MatchingEngineError напрямую), поэтому все существующие
+// catch(const ParseError&) и тесты, стоящие на этом типе, продолжают
+// работать без изменений — RequestRouter ловит этот более специфичный тип
+// раньше базового ParseError, чтобы вернуть код INVALID_ORDER, а не
+// INVALID_REQUEST.
+class InvalidOrderValueError : public ParseError{
+public:
+    explicit InvalidOrderValueError(const std::string& message)
+        : ParseError(message) {}
+};
+
 class DuplicateOrderError : public MatchingEngineError{
 public:
     explicit DuplicateOrderError(const std::string& message)

@@ -15,7 +15,6 @@ namespace matching_engine{
 
 namespace{
 constexpr const char* kDefaultConfigPath = "config/config.json";
-constexpr const char* kSchemaDir = "database";
 constexpr const char* kUsage =
     "Usage: matching_engine [--config <path>] '<json>'\n"
     "       matching_engine [--config <path>] --replay <file.jsonl> [--batch]\n"
@@ -169,12 +168,12 @@ int Application::run(int argc, char** argv){
     Logger::instance().info("Connected to database");
 
     try{
-        applySchema(*connection, kSchemaDir);
+        applySchema(*connection, config.schemaDir);
         Logger::instance().info("Database schema applied");
     } catch(const MatchingEngineError& e){
-        Logger::instance().error(describeSchemaFailure(kSchemaDir));
+        Logger::instance().error(describeSchemaFailure(config.schemaDir));
         Logger::instance().debug(std::string("Schema error: ") + e.what());
-        printer_.printError(describeSchemaFailure(kSchemaDir));
+        printer_.printError(describeSchemaFailure(config.schemaDir));
         return 1;
     }
 

@@ -57,7 +57,7 @@ int main(int argc, char** argv){
     Logger::instance().info("Connected to database");
 
     try{
-        applySchema(*connection, "database");
+        applySchema(*connection, config.database.schemaDir);
         Logger::instance().info("Database schema applied");
     } catch(const MatchingEngineError& e){
         Logger::instance().error(std::string("Schema error: ") + e.what());
@@ -75,11 +75,11 @@ int main(int argc, char** argv){
         return 1;
     }
 
-    // Маршрутизация в этой задаче ограничена PING и заглушкой ошибки для
-    // всего остального: обработка команд предметной области (ADD/CANCEL/
-    // MODIFY/PRINT) подключается в задаче 05, когда RequestRouter получит
-    // доступ к processor и connection.
-    RequestRouter router;
+    // RequestRouter владеет ссылками на processor и connection всё время
+    // работы сервера (задача 05): ADD/CANCEL/MODIFY идут через
+    // CommandParser и processor, PRINT читает processor.orderBook()
+    // напрямую, PING обрабатывается до разбора команды.
+    RequestRouter router(processor, &*connection);
 
     boost::asio::io_context ioContext;
 
@@ -88,6 +88,7 @@ int main(int argc, char** argv){
     // занятом порте — самый частый сценарий неудачного запуска) бросают
     // boost::system::system_error, который ничем из перечисленного выше не
     // перехватывается и без этого try/catch дошёл бы до std::terminate.
+    bool fatalError = false;
     try {
         Server server(ioContext, config.server, router);
 
@@ -97,8 +98,20 @@ int main(int argc, char** argv){
         server.start();
 
         ioContext.run();
+        fatalError = server.hadFatalError();
     } catch (const std::exception& e) {
         Logger::instance().error(std::string("Server error: ") + e.what());
+        return 1;
+    }
+
+    // Сбой сохранения в БД (PersistenceError) уже отвечен клиенту как
+    // INTERNAL_ERROR и не бросил исключения наружу — io_context.run()
+    // вернулся штатно, потому что Server сам остановил его после закрытия
+    // виновной сессии (docs/task4/02-network-protocol.md, раздел 3.5).
+    // Код возврата 1 при этом существен для systemd: под Restart=on-failure
+    // он означает "перезапустить", а не "сервис завершился по плану".
+    if (fatalError) {
+        Logger::instance().error("Shutting down after a database persistence failure");
         return 1;
     }
 

@@ -120,6 +120,8 @@ AppConfig loadConfig(const std::string& configPath){
         requirePort(databaseSection, "database", "port", configPath));
     config.database.dbname = requireString(databaseSection, "database", "name", configPath);
     config.database.user = requireString(databaseSection, "database", "user", configPath);
+    config.database.schemaDir =
+        requireString(databaseSection, "database", "schema_dir", configPath);
 
     const char* password = std::getenv("MATCHING_ENGINE_DB_PASSWORD");
     if(!password || password[0] == '\0'){

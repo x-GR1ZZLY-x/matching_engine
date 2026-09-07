@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -29,8 +30,14 @@ public:
     // размера, — копия дешевле и безопаснее ссылки на объект, чьё время
     // жизни сессии не контролирует). router_ передаётся ссылкой: он
     // принадлежит Server и живёт весь срок работы сервера, дольше любой
-    // отдельной сессии.
-    Session(boost::asio::ip::tcp::socket socket, const MessageCodec& codec, RequestRouter& router);
+    // отдельной сессии. onFatalShutdown вызывается ровно один раз, когда
+    // ответ, построенный после сбоя сохранения в БД (PersistenceError),
+    // гарантированно ушёл клиенту, — Server передаёт сюда обработчик,
+    // закрывающий acceptor и останавливающий io_context (docs/task4/
+    // 02-network-protocol.md, раздел 3.5). Пустой по умолчанию: в тестах,
+    // которые создают Session без Server, сбоев сохранения не бывает.
+    Session(boost::asio::ip::tcp::socket socket, const MessageCodec& codec, RequestRouter& router,
+        std::function<void()> onFatalShutdown = {});
 
     // Запускает первое чтение кадра. Не делается из конструктора: внутри
     // конструктора shared_from_this() ещё не работает — объектом пока не
@@ -55,6 +62,7 @@ private:
     boost::asio::ip::tcp::socket socket_;
     MessageCodec codec_;
     RequestRouter& router_;
+    std::function<void()> onFatalShutdown_;
 
     std::array<char, kFrameHeaderSize> headerBuffer_{};
     std::string bodyBuffer_;
@@ -67,11 +75,18 @@ private:
     // память, уже освобождённую к моменту завершения записи.
     std::deque<std::string> writeQueue_;
 
-    // Взводится closeAfterMessageTooLarge(): после того как очередь
-    // опустеет (то есть системный ответ об ошибке гарантированно уйдёт
-    // раньше самого закрытия), writeNext() закрывает сокет вместо того,
-    // чтобы читать следующий кадр.
+    // Взводится closeAfterMessageTooLarge() и обработчиком PersistenceError
+    // в readBody(): после того как очередь опустеет (то есть системный
+    // ответ об ошибке гарантированно уйдёт раньше самого закрытия),
+    // writeNext() закрывает сокет вместо того, чтобы читать следующий
+    // кадр.
     bool closeAfterWrite_ = false;
+
+    // Взводится вместе с closeAfterWrite_ только на пути PersistenceError:
+    // после того как сокет закрыт, writeNext() зовёт onFatalShutdown_ —
+    // сбой сохранения касается не только этого соединения, а всего
+    // сервиса.
+    bool fatalAfterWrite_ = false;
 };
 
 }
