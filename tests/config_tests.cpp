@@ -5,8 +5,10 @@
 #include<fstream>
 #include<limits>
 #include<string>
+#include<vector>
 #include"config.hpp"
 #include"exceptions.hpp"
+#include"response_serializer.hpp"
 
 using namespace matching_engine;
 
@@ -289,8 +291,11 @@ TEST(ConfigTest, ZeroPortIsAccepted){
     EXPECT_EQ(config.server.port, 0);
 }
 
-// Ноль запретил бы любое непустое сообщение — max_message_size обязан быть
-// не меньше единицы.
+// Ноль отвергается нижней границей server.max_message_size, а не отдельной
+// проверкой "не меньше единицы" — такой проверки в requireMaxMessageSize
+// отдельно нет: минимально допустимое значение — minMaxMessageSize(), оно
+// намного больше единицы (замечание ревью второго круга, п.7: комментарий
+// раньше называл устаревшую причину отказа).
 TEST(ConfigTest, ZeroMaxMessageSizeThrowsConfigError){
     const ScopedTempFile tempFile("zero_max_message_size", R"({
         "server": {
@@ -356,4 +361,93 @@ TEST(ConfigTest, MaxMessageSizeAtUint32MaxIsAccepted){
 
     EXPECT_EQ(config.server.maxMessageSize,
         static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()));
+}
+
+// Нижняя граница server.max_message_size (docs/task4/02-network-protocol.md,
+// раздел 4.1, задача 06 критерий 12): значение на один байт меньше границы,
+// вычисленной minMaxMessageSize(), обязано отвергаться — короткий ответ об
+// ошибке в такой лимит гарантированно не поместится.
+TEST(ConfigTest, MaxMessageSizeBelowLowerBoundThrowsConfigError){
+    const ScopedTempFile tempFile("max_message_size_below_lower_bound",
+        R"({
+        "server": {
+            "address": "0.0.0.0",
+            "port": 9000,
+            "max_message_size": )" + std::to_string(minMaxMessageSize() - 1) + R"(
+        },
+        "database": {
+            "host": "db.example.test",
+            "port": 6543,
+            "name": "some_db",
+            "user": "some_user",
+            "schema_dir": "database"
+        }
+    })");
+    ScopedEnv env("MATCHING_ENGINE_DB_PASSWORD", "s3cret");
+
+    EXPECT_THROW(loadConfig(tempFile.path()), ConfigError);
+}
+
+// Граничное значение обязано приниматься, а не отвергаться вместе со
+// значениями ниже границы.
+TEST(ConfigTest, MaxMessageSizeAtLowerBoundIsAccepted){
+    const ScopedTempFile tempFile("max_message_size_at_lower_bound",
+        R"({
+        "server": {
+            "address": "0.0.0.0",
+            "port": 9000,
+            "max_message_size": )" + std::to_string(minMaxMessageSize()) + R"(
+        },
+        "database": {
+            "host": "db.example.test",
+            "port": 6543,
+            "name": "some_db",
+            "user": "some_user",
+            "schema_dir": "database"
+        }
+    })");
+    ScopedEnv env("MATCHING_ENGINE_DB_PASSWORD", "s3cret");
+
+    const AppConfig config = loadConfig(tempFile.path());
+
+    EXPECT_EQ(config.server.maxMessageSize, minMaxMessageSize());
+}
+
+// Замечание ревью второго круга, п.2: оба теста границы выше подставляют в
+// конфигурацию minMaxMessageSize()-1 и саму minMaxMessageSize() — то есть
+// сверяют loadConfig с той же функцией, которую и нужно проверить. Если
+// расчёт границы начнёт занижать её (как показал живой сценарий из п.1:
+// сверхдлинный command_id, не отфильтрованный до попытки его эхировать),
+// оба теста остались бы зелёными. Здесь эталон другой: конкретные худшие
+// входы ResponseSerializer::error() сравниваются с minMaxMessageSize()
+// напрямую, а не через повторный вызов той же функции, которая эту границу
+// вычисляет, — тест падает, если фактический размер ответа для какого-то
+// реально используемого кода ошибки перестанет помещаться в вычисленную
+// границу.
+//
+// Заодно пришпиливает замечание п.4: "RESPONSE_TOO_LARGE" в
+// maxErrorResponseSize() (response_serializer.cpp) берётся как самый
+// длинный код ошибки среди реально возвращаемых сервером вручную — это
+// наблюдение, а не гарантия языка. Если когда-нибудь появится код длиннее,
+// его ответ здесь окажется больше границы, вычисленной по
+// "RESPONSE_TOO_LARGE", и тест покраснеет раньше, чем сервер окажется в
+// ветке "даже короткий ответ об ошибке не влез", которую остальные
+// комментарии проекта считают недостижимой.
+TEST(ConfigTest, WorstCaseErrorResponseFitsWithinLowerBoundForEachUsedCode){
+    const std::string worstCaseCommandId(ResponseSerializer::kMaxCommandIdLength,
+        static_cast<char>(1));
+    const std::string worstCaseMessage(ResponseSerializer::kMaxMessageLength + 1,
+        static_cast<char>(1));
+    // Список сверен с исходниками: grep -n '"[A-Z_]*"' src/request_router.cpp
+    // src/session.cpp по кодам, переданным в ResponseSerializer::error(...).
+    const std::vector<std::string> usedErrorCodes = {
+        "INVALID_REQUEST", "INVALID_ORDER", "INTERNAL_ERROR", "DUPLICATE_ORDER",
+        "ORDER_NOT_FOUND", "RESPONSE_TOO_LARGE", "MESSAGE_TOO_LARGE",
+    };
+
+    for (const std::string& code : usedErrorCodes) {
+        const std::string response =
+            ResponseSerializer::error(worstCaseCommandId, code, worstCaseMessage);
+        EXPECT_LE(response.size(), minMaxMessageSize()) << "error code: " << code;
+    }
 }

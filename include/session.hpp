@@ -30,12 +30,16 @@ public:
     // размера, — копия дешевле и безопаснее ссылки на объект, чьё время
     // жизни сессии не контролирует). router_ передаётся ссылкой: он
     // принадлежит Server и живёт весь срок работы сервера, дольше любой
-    // отдельной сессии. onFatalShutdown вызывается ровно один раз, когда
-    // ответ, построенный после сбоя сохранения в БД (PersistenceError),
-    // гарантированно ушёл клиенту, — Server передаёт сюда обработчик,
-    // закрывающий acceptor и останавливающий io_context (docs/task4/
-    // 02-network-protocol.md, раздел 3.5). Пустой по умолчанию: в тестах,
-    // которые создают Session без Server, сбоев сохранения не бывает.
+    // отдельной сессии. onFatalShutdown вызывается не более одного раза за
+    // время жизни сессии (см. notifyFatalShutdown()/fatalNotified_ ниже —
+    // при конвейерной обработке несколько точек кода готовы его вызвать на
+    // одном и том же фатальном сбое), когда ответ, построенный после сбоя
+    // сохранения в БД (PersistenceError), гарантированно ушёл клиенту либо
+    // было решено, что отправлять уже нечего, — Server передаёт сюда
+    // обработчик, закрывающий acceptor и останавливающий io_context
+    // (docs/task4/02-network-protocol.md, раздел 3.5). Пустой по
+    // умолчанию: в тестах, которые создают Session без Server, сбоев
+    // сохранения не бывает.
     Session(boost::asio::ip::tcp::socket socket, const MessageCodec& codec, RequestRouter& router,
         std::function<void()> onFatalShutdown = {});
 
@@ -58,6 +62,14 @@ private:
     void enqueueResponse(const std::string& payload);
     void writeNext();
     void closeSocket();
+
+    // Вызывает onFatalShutdown_ ровно один раз (fatalNotified_ — защёлка):
+    // несколько точек кода взводят fatalAfterWrite_ и готовы его позвать
+    // (writeNext() дважды, closeAfterMessageTooLarge() и readBody() дважды),
+    // и при конвейерной обработке запросов может сработать больше одной из
+    // них на одном и том же фатальном сбое — см. комментарий у
+    // fatalNotified_.
+    void notifyFatalShutdown();
 
     boost::asio::ip::tcp::socket socket_;
     MessageCodec codec_;
@@ -87,6 +99,16 @@ private:
     // сбой сохранения касается не только этого соединения, а всего
     // сервиса.
     bool fatalAfterWrite_ = false;
+
+    // Защёлка notifyFatalShutdown(): при конвейерной обработке одно и то же
+    // соединение может закрыться синхронно из readBody()/
+    // closeAfterMessageTooLarge() (когда даже короткий ответ об ошибке не
+    // помещается в лимит) и следом асинхронно — из writeNext(), когда уже
+    // запущенная запись более раннего ответа на этом же, теперь закрытом,
+    // сокете завершится ошибкой. Без этого флага onFatalShutdown_ (который
+    // останавливает io_context всего сервиса, а не одно соединение) мог бы
+    // вызваться дважды.
+    bool fatalNotified_ = false;
 };
 
 }

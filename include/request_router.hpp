@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <string>
 
 #include "command_parser.hpp"
@@ -38,10 +39,22 @@ struct RouteResult {
     // обязана закрыть соединение, а сервис — завершить работу (раздел 3.5,
     // последний абзац). При любом другом исходе остаётся false.
     bool fatal = false;
+
+    // Тот же command_id, что уже зашит в payload (эхо или его отсутствие).
+    // Нужен Session отдельно от payload: если payload сам не помещается в
+    // max_message_size, Session строит новый, короткий ответ
+    // RESPONSE_TOO_LARGE и обязана эхировать в нём тот же command_id
+    // (docs/task4/02-network-protocol.md, раздел 3.5) — не разбирая payload
+    // обратно в JSON ради одного поля.
+    std::optional<std::string> commandId;
 };
 
 class RequestRouter {
 public:
+    // Предел длины command_id вынесен в ResponseSerializer::kMaxCommandIdLength
+    // (он ограничивает форму ответа, а не путь маршрутизации) — здесь только
+    // используется при проверке длины входящего command_id.
+
     // processor нужен всегда: и для PRINT (только чтение книги), и для
     // изменяющих команд. connection нужен только изменяющим командам —
     // CommandProcessor::process пишет в БД в транзакции. Умолчания у

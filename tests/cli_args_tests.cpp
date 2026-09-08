@@ -91,3 +91,38 @@ TEST(CliArgsTest, ClientWithoutPortFails){
     EXPECT_FALSE(ok);
     EXPECT_FALSE(error.empty());
 }
+
+// Критерий 9 задачи 06: нечисловой порт обязан отвергаться уже при разборе
+// argv, а не приводить к std::invalid_argument из std::stoi где-то глубже.
+TEST(CliArgsTest, ClientWithNonNumericPortFails){
+    std::string host, port, error;
+
+    const bool ok = callParseClientArgs({"--host", "127.0.0.1", "--port", "abc"}, host, port,
+        error);
+
+    EXPECT_FALSE(ok);
+    EXPECT_FALSE(error.empty());
+}
+
+// Верхняя граница диапазона (65535) обязана приниматься: без этого теста
+// замена "<= 65535" на "< 65535" в isValidPort() не роняла бы ни одного
+// теста.
+TEST(CliArgsTest, ClientWithMaxValidPortSucceeds){
+    std::string host, port, error;
+
+    const bool ok = callParseClientArgs({"--host", "127.0.0.1", "--port", "65535"}, host, port,
+        error);
+
+    EXPECT_TRUE(ok);
+    EXPECT_EQ(port, "65535");
+}
+
+TEST(CliArgsTest, ClientWithOutOfRangePortFails){
+    std::string host, port, error;
+
+    const bool ok = callParseClientArgs({"--host", "127.0.0.1", "--port", "99999"}, host, port,
+        error);
+
+    EXPECT_FALSE(ok);
+    EXPECT_FALSE(error.empty());
+}

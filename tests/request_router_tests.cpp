@@ -103,6 +103,77 @@ TEST(RequestRouterTest, ImplausiblyLongTypeIsTruncatedInMessage) {
     EXPECT_NE(response.at("message").get<std::string>().find("..."), std::string::npos);
 }
 
+// Замечание ревью: усечение по байтам может разрезать многобайтовую
+// UTF-8-последовательность пополам, и nlohmann::json::dump() бросает
+// json::type_error на невалидном байте. "€" (U+20AC) — три байта; 30
+// повторов дают 90 байт, и граница усечения kMaxTypeInMessageLength (64
+// байта, request_router.cpp) приходится ровно на середину 22-го символа.
+// Двухбайтовая кириллица этот дефект не ловит: 64 делится на 2 нацело, и
+// граница всегда попадала бы между символами — поэтому здесь трёхбайтовый
+// символ, а не любой многобайтовый.
+TEST(RequestRouterTest, ImplausiblyLongMultibyteTypeIsTruncatedOnCodepointBoundary) {
+    CommandProcessor processor;
+    RequestRouter router(processor, nullptr);
+
+    std::string hugeType;
+    for (int i = 0; i < 30; ++i) {
+        hugeType += "\xE2\x82\xAC";
+    }
+
+    nlohmann::json request;
+    request["type"] = hugeType;
+
+    // До исправления здесь бросало nlohmann::json::type_error ("invalid
+    // UTF-8 byte") из ResponseSerializer::error() — и в Session это
+    // разрывало бы соединение клиента, отправившего вполне безобидный
+    // непопулярный тип команды.
+    const std::string responsePayload = router.handle(request.dump()).payload;
+    const nlohmann::json response = nlohmann::json::parse(responsePayload);
+
+    EXPECT_EQ(response.at("status"), "ERROR");
+    EXPECT_EQ(response.at("error"), "INVALID_REQUEST");
+    EXPECT_NE(response.at("message").get<std::string>().find("..."), std::string::npos);
+}
+
+// Замечание ревью второго круга, п.3: усечение по границе UTF-8-символа
+// было покрыто тестом только на пути "type" (см. тест выше). Путь "message"
+// использует ту же ResponseSerializer::truncateUtf8, но через другой
+// источник текста: "order_type" отдаёт пользовательский текст напрямую в
+// ParseError ("Unknown order_type: " + orderType, command_parser.cpp), и
+// граница усечения kMaxMessageLength (512 байт) так же может прийтись на
+// середину многобайтового символа. Префикс "Unknown order_type: " — 20
+// байт; ведущий "X" сдвигает фазу так, чтобы граница 512 действительно
+// прошлась по многобайтовому символу (без сдвига 512-20 делится на 3
+// нацело, и граница всегда попадала бы между символами — тот же эффект,
+// что и с чётным числом байт в тесте на "type" выше). 170 повторов "€" (3
+// байта) после однобайтового префикса дают байт с индексом 512 (первый
+// исключаемый) внутри кодовой последовательности "€" (продолжение,
+// 10xxxxxx).
+TEST(RequestRouterTest, ImplausiblyLongMultibyteOrderTypeIsTruncatedOnCodepointBoundaryInMessage) {
+    CommandProcessor processor;
+    RequestRouter router(processor, nullptr);
+
+    std::string hugeOrderType = "X";
+    for (int i = 0; i < 170; ++i) {
+        hugeOrderType += "\xE2\x82\xAC";
+    }
+
+    nlohmann::json request;
+    request["type"] = "ADD";
+    request["order_type"] = hugeOrderType;
+
+    // До исправления границы усечения в message() этот путь не был
+    // защищён отдельным тестом: тот же класс отказа (json::type_error из
+    // dump() на невалидном UTF-8 хвосте), что уже закрыт для "type", мог
+    // остаться непокрытым для "message".
+    const std::string responsePayload = router.handle(request.dump()).payload;
+    const nlohmann::json response = nlohmann::json::parse(responsePayload);
+
+    EXPECT_EQ(response.at("status"), "ERROR");
+    EXPECT_EQ(response.at("error"), "INVALID_REQUEST");
+    EXPECT_NE(response.at("message").get<std::string>().find("..."), std::string::npos);
+}
+
 // Конструктор без соединения к БД — это вырожденная, но легитимная
 // конфигурация (тесты формата кадра), и она обязана быть видна на месте
 // вызова, а не спрятана за умолчанием. Ветка тоже обязана логировать

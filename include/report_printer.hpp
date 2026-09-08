@@ -31,6 +31,12 @@ public:
     void printReplaySummary(long long processedCommands, long long trades,
         long long duplicates, long long skippedLines,
         std::chrono::milliseconds elapsed) const;
+
+    // Ответ сервера matching-engine-client (задача 06): полезная нагрузка
+    // кадра ответа уже готовая строка JSON (её строит сервер, а клиент
+    // только доставляет байты через Client — REQ-CLI-04), поэтому здесь
+    // печатается буквально, без разбора и повторной сериализации.
+    void printResponse(const std::string& response) const;
 };
 
 }

@@ -190,6 +190,82 @@ TEST(NetworkTest, UnknownCommandTypeReturnsInvalidRequest) {
     EXPECT_EQ(response.at("error"), "INVALID_REQUEST");
 }
 
+// Замечание ревью второго круга, п.1 — живой сценарий, воспроизведённый на
+// работающем сервере: запрос без поля "type", но со сверхдлинным
+// command_id, эхо которого само по себе превысило бы max_message_size. До
+// исправления порядка проверок в RequestRouter::handle такой запрос
+// проходил проверку "это объект со строковым type" (валится на "type") и
+// уходил в ответ с неотфильтрованным эхом command_id раньше проверки его
+// длины — Session::enqueueResponse бросал MessageTooLargeError, попытка
+// построить RESPONSE_TOO_LARGE с тем же неотфильтрованным эхом бросала
+// снова, и соединение закрывалось без единого байта ответа (клиент получал
+// голый обрыв, в логе сервера — ни строки).
+TEST(NetworkTest, RequestWithoutTypeAndOversizedCommandIdGetsResponseConnectionStaysAlive) {
+    constexpr std::size_t kServerLimit = 4096;
+    TestServer testServer(kServerLimit);
+
+    Client client(kServerLimit * 4);
+    client.connect("127.0.0.1", testServer.port());
+
+    // Длина command_id подобрана так, чтобы сам запрос ({"command_id":"..."},
+    // 17 байт обрамления + N) укладывался в kServerLimit, а неотфильтрованное
+    // эхо в ответе об ошибке (131 байт фиксированной части ответа + N) —
+    // нет: N=4079 даёт запрос ровно 4096 байт (помещается) и гипотетический
+    // ответ 4210 байт (не поместился бы). Это и воспроизводит живой
+    // сценарий: кадр запроса читается целиком, а не отвергается на
+    // заголовке (тем MESSAGE_TOO_LARGE, который проверяется в других
+    // тестах) — отказать здесь обязан именно фильтр длины command_id.
+    constexpr std::size_t kCommandIdLength = 4079;
+    nlohmann::json request;
+    request["command_id"] = std::string(kCommandIdLength, 'x');
+    client.sendRawBytes(client.encodeFrame(request.dump()));
+
+    const nlohmann::json response = nlohmann::json::parse(client.receiveFrame());
+    EXPECT_EQ(response.at("status"), "ERROR");
+    EXPECT_EQ(response.at("error"), "INVALID_REQUEST");
+    // Неправдоподобно длинный command_id не эхируется вовсе.
+    EXPECT_FALSE(response.contains("command_id"));
+
+    // Соединение осталось живым: следующая команда в том же соединении
+    // выполняется успешно.
+    const nlohmann::json pong = client.request(nlohmann::json::parse(R"({"type":"PING"})"));
+    EXPECT_EQ(pong.at("status"), "OK");
+    EXPECT_EQ(pong.at("result"), "PONG");
+}
+
+// Замечание ревью второго круга, п.3: сетевого теста на то, что многобайтовый
+// неизвестный тип не рвёт соединение, не было — а это ровно тот симптом,
+// который наблюдался вживую (json::type_error из dump() на невалидном
+// UTF-8-хвосте, вылетающий из RequestRouter::handle в Session, которая
+// закрывает соединение catch(const std::exception&)). "€" повторён 30 раз
+// (90 байт) — та же математика границы, что и в
+// RequestRouterTest.ImplausiblyLongMultibyteTypeIsTruncatedOnCodepointBoundary,
+// но здесь проверяется весь сетевой путь, а не только RequestRouter.
+TEST(NetworkTest, MultibyteUnknownTypeReturnsErrorThenNextCommandSucceeds) {
+    TestServer testServer(1024);
+
+    Client client(1024);
+    client.connect("127.0.0.1", testServer.port());
+
+    std::string hugeType;
+    for (int i = 0; i < 30; ++i) {
+        hugeType += "\xE2\x82\xAC";
+    }
+    nlohmann::json request;
+    request["type"] = hugeType;
+
+    const nlohmann::json response = client.request(request);
+    EXPECT_EQ(response.at("status"), "ERROR");
+    EXPECT_EQ(response.at("error"), "INVALID_REQUEST");
+
+    // Соединение осталось живым — следующая команда в том же соединении
+    // выполняется успешно.
+    const nlohmann::json pingResponse =
+        client.request(nlohmann::json::parse(R"({"type":"PING"})"));
+    EXPECT_EQ(pingResponse.at("status"), "OK");
+    EXPECT_EQ(pingResponse.at("result"), "PONG");
+}
+
 // Критерий 6: кадр отправлен четырьмя частями — часть заголовка, остаток
 // заголовка, часть тела, остаток тела.
 TEST(NetworkTest, FragmentedFrameIsAssembledCorrectly) {
@@ -820,15 +896,14 @@ TEST(NetworkTest, MessageTooLargeIsQueuedBehindLargePrintResponse) {
     }
 }
 
-// Ответ, который сам
-// (а не заявленный клиентом размер запроса) не помещается в
-// max_message_size, обязан дойти до клиента диагностикой через ту же
-// очередь записи, а не оборвать соединение без единого байта. Раздел 4
-// контракта разрешает закрывать соединение молча только при нарушении
-// протокола — здесь же запрос (PRINT) был совершенно корректным, соединение
-// закрывает уже сам сервер, не сумевший закодировать честно построенный
-// ответ.
-TEST(NetworkTest, OversizedResponseIsReportedNotSilentlyDropped) {
+// Ответ, который сам (а не заявленный клиентом размер запроса) не
+// помещается в max_message_size, обязан дойти до клиента диагностикой с
+// кодом RESPONSE_TOO_LARGE через ту же очередь записи, а соединение — не
+// закрываться (docs/task4/02-network-protocol.md, раздел 4.1, задача 06
+// критерий 11). Запрос (PRINT) был совершенно корректным, кадр запроса
+// прочитан целиком, позиция в потоке известна — следующая команда в этом же
+// соединении обязана выполниться, а не наткнуться на разорванный сокет.
+TEST(NetworkTest, OversizedResponseReturnsResponseTooLargeAndKeepsConnectionAlive) {
     constexpr std::size_t kServerLimit = 4096;
     TestServer testServer(kServerLimit);
 
@@ -849,28 +924,44 @@ TEST(NetworkTest, OversizedResponseIsReportedNotSilentlyDropped) {
 
     const nlohmann::json response = nlohmann::json::parse(client.receiveFrame());
     EXPECT_EQ(response.at("status"), "ERROR");
-    ASSERT_TRUE(response.contains("error"));
+    EXPECT_EQ(response.at("error"), "RESPONSE_TOO_LARGE");
     ASSERT_TRUE(response.contains("message"));
 
-    // Обрыв различается от таймаута по типу исключения — тем же способом,
-    // что и в тестах превышения размера выше.
-    try {
-        client.receiveFrame();
-        FAIL() << "сервер обязан был закрыть соединение";
-    } catch (const NetworkTimeoutError&) {
-        FAIL() << "соединение осталось открытым: сервер молчит вместо закрытия";
-    } catch (const NetworkError&) {
-        SUCCEED();
-    }
-
-    // Сервер остался жив и обслуживает следующего клиента — это не тот
-    // фатальный сбой, что при PersistenceError, а несовпадение размера
-    // ответа с конфигурацией.
-    Client another(1024);
-    another.connect("127.0.0.1", testServer.port());
-    const nlohmann::json pong = another.request(nlohmann::json::parse(R"({"type":"PING"})"));
+    // Соединение осталось живым: следующая команда в том же соединении
+    // (тот же client, тот же сокет) выполняется успешно — это и есть
+    // проверка критерия 11, а не просто "сервер жив и принял кого-то ещё".
+    const nlohmann::json pong = client.request(nlohmann::json::parse(R"({"type":"PING"})"));
     EXPECT_EQ(pong.at("status"), "OK");
     EXPECT_EQ(pong.at("result"), "PONG");
+}
+
+// Замечание ревью, пункт 2: запрос, ответ на который не помещается в
+// max_message_size, уже прочитан и выполнен целиком (не то же самое, что
+// MESSAGE_TOO_LARGE у заголовка, где тела ещё не было) — раздел 3.5
+// контракта требует эха command_id везде, где запрос удалось разобрать
+// настолько, чтобы его извлечь, и раздел 4.1 исключения для этого случая не
+// вводит.
+TEST(NetworkTest, OversizedResponseEchoesCommandId) {
+    constexpr std::size_t kServerLimit = 4096;
+    TestServer testServer(kServerLimit);
+
+    constexpr int kOrderCount = 500;
+    runInIoContext(testServer, [&testServer] {
+        for (int i = 0; i < kOrderCount; ++i) {
+            testServer.processor.restoreOrder(std::make_shared<Order>(
+                i + 1, Side::Buy, 100, 1, 1, i + 1, OrderStatus::Open));
+        }
+    });
+
+    Client client(kServerLimit * 10);
+    client.connect("127.0.0.1", testServer.port());
+    client.sendRawBytes(
+        client.encodeFrame(R"({"type":"PRINT","command_id":"cmd-print-too-large"})"));
+
+    const nlohmann::json response = nlohmann::json::parse(client.receiveFrame());
+    EXPECT_EQ(response.at("status"), "ERROR");
+    EXPECT_EQ(response.at("error"), "RESPONSE_TOO_LARGE");
+    EXPECT_EQ(response.at("command_id"), "cmd-print-too-large");
 }
 
 // Механизм фатального завершения после сбоя сохранения в БД
@@ -1006,4 +1097,87 @@ TEST(NetworkTest, PersistenceFailureKeepsFatalFlagWhenClientDisconnectsWithoutRe
 
     joinIoThreadWithTimeout(testServer, std::chrono::seconds(5));
     EXPECT_TRUE(testServer.server.hadFatalError());
+}
+
+// Замечание ревью, пункт 8: из трёх сочетаний "ответ не поместился" и
+// "сбой сохранения" тестом покрыто было только одно. Не проверялась именно
+// та ветка, где closeAfterWrite_/fatalAfterWrite_ взводятся из-под catch
+// (Session::readBody, вложенный catch(MessageTooLargeError&), строки,
+// обрабатывающие сбой отправки даже короткого RESPONSE_TOO_LARGE) — а
+// признак фатальности терялся на соседних ветках дважды за проект.
+// max_message_size здесь подобран так, что входящий ADD (96 байт) проходит,
+// а оба возможных ответа — INTERNAL_ERROR после PersistenceError (124
+// байта) и сам RESPONSE_TOO_LARGE (131 байт) — не помещаются в лимит.
+// Сервер не может отправить клиенту вообще ничего и обязан закрыть
+// соединение без единого байта ответа, но всё равно взвести признак
+// фатальности и остановить сервис — то же самое, что происходит, когда
+// ответ всё-таки помещается, просто без промежуточного шага.
+TEST(NetworkTest, PersistenceFailureWithUnfittableResponseStillSetsFatalFlag) {
+    auto connOpt = tryConnect();
+    if (!connOpt) {
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    cleanupAllTables(*connOpt);
+
+    const std::string commandId = "cmd-fatal-tiny";
+    connOpt->execute(
+        "INSERT INTO processed_commands (command_id, command_type, status, result) "
+        "VALUES ($1, $2, $3, $4)",
+        {std::optional<std::string>(commandId), std::optional<std::string>("ADD"),
+            std::optional<std::string>("OK"), std::nullopt});
+
+    constexpr std::size_t kTinyLimit = 100;
+    TestServer testServer(kTinyLimit, &*connOpt);
+
+    nlohmann::json add;
+    add["type"] = "ADD";
+    add["order_id"] = 503;
+    add["side"] = "BUY";
+    add["price"] = 10;
+    add["quantity"] = 1;
+    add["command_id"] = commandId;
+
+    // Клиентский кодек намеренно с бОльшим пределом, чем у сервера — иначе
+    // encodeFrame отверг бы кадр сам, ещё до отправки.
+    Client client(4096);
+    client.connect("127.0.0.1", testServer.port());
+    client.sendRawBytes(client.encodeFrame(add.dump()));
+
+    try {
+        client.receiveFrame();
+        FAIL() << "сервер обязан был закрыть соединение, не отправив ответ";
+    } catch (const NetworkTimeoutError&) {
+        FAIL() << "соединение осталось открытым: сервер молчит вместо закрытия";
+    } catch (const NetworkError&) {
+        SUCCEED();
+    }
+
+    joinIoThreadWithTimeout(testServer, std::chrono::seconds(5));
+    EXPECT_TRUE(testServer.server.hadFatalError());
+}
+
+// Подключение к порту, который никто не слушает: клиент обязан получить
+// отказ немедленно и именно обрывом, а не молчанием до истечения таймаута.
+// На этом держится поведение консольной программы (src/client_main.cpp):
+// она сообщает человеку понятную причину и завершается с ненулевым кодом,
+// а не подвисает на пустом порту.
+TEST(NetworkTest, ConnectToClosedPortFailsWithConnectionErrorNotTimeout) {
+    unsigned short closedPort = 0;
+    {
+        // Порт выбирает операционная система, а после разрушения сервера
+        // его больше никто не слушает — это надёжнее произвольно взятого
+        // номера, который на машине разработчика может оказаться занят.
+        TestServer testServer(1024);
+        closedPort = testServer.port();
+    }
+
+    Client client(1024);
+    try {
+        client.connect("127.0.0.1", closedPort);
+        FAIL() << "подключение к закрытому порту обязано провалиться";
+    } catch (const NetworkTimeoutError&) {
+        FAIL() << "отказ в подключении обязан приходить обрывом, а не таймаутом";
+    } catch (const NetworkError&) {
+        SUCCEED();
+    }
 }

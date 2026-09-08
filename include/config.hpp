@@ -38,4 +38,11 @@ struct AppConfig{
 // задана или пуста.
 AppConfig loadConfig(const std::string& configPath);
 
+// Нижняя граница server.max_message_size (docs/task4/02-network-protocol.md,
+// раздел 4.1): loadConfig отвергает значение ниже неё как ConfigError.
+// Вынесена в заголовок ради тестов границы — так тест сверяется с тем же
+// значением, что реально проверяет loadConfig, а не с продублированным
+// вручную числом, которое могло бы разойтись с ним при следующей правке.
+std::size_t minMaxMessageSize();
+
 }

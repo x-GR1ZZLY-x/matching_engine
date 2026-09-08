@@ -12,24 +12,11 @@ namespace matching_engine {
 namespace {
 
 // type, в отличие от command_id, — не идентификатор, а часть текста для
-// человека в message, поэтому усечение с многоточием допустимо.
+// человека в message, поэтому усечение с многоточием допустимо. Усечение —
+// ResponseSerializer::truncateUtf8, общая с error(): substr() по числу байт
+// не знает о границах символов и на многобайтовом UTF-8 может оставить
+// невалидный хвост, на котором nlohmann::json::dump() бросает исключение.
 constexpr std::size_t kMaxTypeInMessageLength = 64;
-
-// Реальные command_id на порядок короче этого предела; неправдоподобно
-// длинный отвергается как ошибка запроса ещё до разбора и выполнения
-// команды (docs/task4/02-network-protocol.md, разделы 3.1 и 3.5) — иначе
-// для любого max_message_size нашёлся бы допустимый запрос, ответ на
-// который лимит превысит, а при успешном выполнении команда оказалась бы
-// выполнена и записана в базу, но клиент не получил бы command_id, по
-// которому сопоставляет ответ со своим запросом.
-constexpr std::size_t kMaxCommandIdLength = 128;
-
-std::string truncateForMessage(const std::string& value, std::size_t maxLength) {
-    if (value.size() <= maxLength) {
-        return value;
-    }
-    return value.substr(0, maxLength) + "...";
-}
 
 // command_id извлекается прямо из сырого JSON запроса, а не из разобранной
 // команды: он должен попасть в ответ и тогда, когда сам разбор команды
@@ -87,6 +74,10 @@ RequestRouter::RequestRouter(CommandProcessor& processor, PgConnection* connecti
     : processor_(processor), connection_(connection) {}
 
 RouteResult RequestRouter::handleDomainCommand(const nlohmann::json& request) const {
+    // Вычисляется один раз и переиспользуется в обеих ветках catch ниже:
+    // запрос не меняется между ними, а extractCommandId делает собственный
+    // обход JSON и копию строки на каждый вызов (замечание ревью, п.6).
+    const std::optional<std::string> commandIdFromRequest = extractCommandId(request);
     std::unique_ptr<Command> command;
     try {
         command = parser_.parse(request);
@@ -96,11 +87,11 @@ RouteResult RequestRouter::handleDomainCommand(const nlohmann::json& request) co
         // таблицы раздела 3.5, чем общий INVALID_REQUEST ниже. Ловится
         // раньше базового ParseError/MatchingEngineError по правилам
         // перегрузки catch.
-        return {ResponseSerializer::error(extractCommandId(request), "INVALID_ORDER", e.what()),
-            false};
+        return {ResponseSerializer::error(commandIdFromRequest, "INVALID_ORDER", e.what()),
+            false, commandIdFromRequest};
     } catch (const MatchingEngineError& e) {
-        return {ResponseSerializer::error(extractCommandId(request), "INVALID_REQUEST", e.what()),
-            false};
+        return {ResponseSerializer::error(commandIdFromRequest, "INVALID_REQUEST", e.what()),
+            false, commandIdFromRequest};
     }
 
     const std::optional<std::string>& commandId = command->commandId_;
@@ -122,12 +113,12 @@ RouteResult RequestRouter::handleDomainCommand(const nlohmann::json& request) co
         Logger::instance().error(
             "RequestRouter has no database connection: state-changing command rejected");
         return {ResponseSerializer::error(commandId, "INTERNAL_ERROR",
-            "Database connection is not configured"), false};
+            "Database connection is not configured"), false, commandId};
     }
 
     try {
         const ExecutionResult result = processor_.process(*command, *connection_);
-        return {ResponseSerializer::success(commandId, orderId, result), false};
+        return {ResponseSerializer::success(commandId, orderId, result), false, commandId};
     } catch (const PersistenceError& e) {
         // Книга в памяти уже изменена (движок отработал до броска
         // исключения), а запись в БД не удалась — продолжать обслуживание
@@ -138,16 +129,19 @@ RouteResult RequestRouter::handleDomainCommand(const nlohmann::json& request) co
         Logger::instance().error(
             std::string("Persistence error, shutting down: ") + e.what());
         return {ResponseSerializer::error(commandId, "INTERNAL_ERROR",
-            "Failed to save results to the database"), true};
+            "Failed to save results to the database"), true, commandId};
     } catch (const DuplicateOrderError& e) {
-        return {ResponseSerializer::error(commandId, "DUPLICATE_ORDER", e.what()), false};
+        return {ResponseSerializer::error(commandId, "DUPLICATE_ORDER", e.what()), false,
+            commandId};
     } catch (const OrderBookError& e) {
-        return {ResponseSerializer::error(commandId, "ORDER_NOT_FOUND", e.what()), false};
+        return {ResponseSerializer::error(commandId, "ORDER_NOT_FOUND", e.what()), false,
+            commandId};
     } catch (const MatchingEngineError& e) {
         // Остаток иерархии (в первую очередь ParseError: command_id
         // отсутствует) — ближайший код таблицы раздела 3.5 для всего, что
         // не подошло под более специфичные ветки выше.
-        return {ResponseSerializer::error(commandId, "INVALID_REQUEST", e.what()), false};
+        return {ResponseSerializer::error(commandId, "INVALID_REQUEST", e.what()), false,
+            commandId};
     }
 }
 
@@ -160,34 +154,46 @@ RouteResult RequestRouter::handle(const std::string& payload) const {
         // раздел 1.2) тоже проваливает разбор JSON и приходит сюда же —
         // отдельной ветки для неё не нужно.
         return {ResponseSerializer::error(std::nullopt, "INVALID_REQUEST",
-            "Request payload is not valid JSON"), false};
+            "Request payload is not valid JSON"), false, std::nullopt};
+    }
+
+    // Длина command_id проверяется здесь, раньше всех прочих проверок
+    // запроса — в частности, раньше проверки поля "type" ниже — и до всякой
+    // попытки его выполнить (docs/task4/02-network-protocol.md, раздел 3.1):
+    // фильтр не зависит от того, есть ли в запросе "type", и обязан
+    // применяться к любому JSON-значению, разобравшемуся из полезной
+    // нагрузки. До этой правки проверка стояла после проверки "type", и
+    // запрос без "type" уходил в ответ с неотфильтрованным эхом, которое
+    // само могло превысить max_message_size (замечание ревью второго
+    // круга, п.1) — enqueueResponse в Session бросал, а RESPONSE_TOO_LARGE
+    // строился с тем же неотфильтрованным эхом и бросал снова, разрывая
+    // соединение без единого байта ответа. contains() возвращает false для
+    // необъектных значений (bool/array/...), поэтому явная проверка
+    // is_object() здесь не нужна. Для изменяющих команд это единственный
+    // способ не оказаться в ситуации "команда выполнена и записана в базу,
+    // а эхо в ответе потеряно". Сам неправдоподобно длинный командный id не
+    // эхируется — эхировать в ответе об ошибке нечего.
+    if (request.contains("command_id") && request["command_id"].is_string() &&
+        request["command_id"].get<std::string>().size() > ResponseSerializer::kMaxCommandIdLength) {
+        return {ResponseSerializer::error(std::nullopt, "INVALID_REQUEST",
+            "command_id is implausibly long"), false, std::nullopt};
     }
 
     if (!request.is_object() || !request.contains("type") || !request["type"].is_string()) {
-        return {ResponseSerializer::error(extractCommandId(request), "INVALID_REQUEST",
-            "Request must be a JSON object with a string \"type\" field"), false};
-    }
-
-    // Длина command_id проверяется здесь, для любого типа запроса и до
-    // всякой попытки его выполнить (docs/task4/02-network-protocol.md,
-    // раздел 3.1): для изменяющих команд это единственный способ не
-    // оказаться в ситуации "команда выполнена и записана в базу, а эхо в
-    // ответе потеряно". Сам неправдоподобно длинный командный id не
-    // эхируется — эхировать в ответе об ошибке нечего.
-    if (request.contains("command_id") && request["command_id"].is_string() &&
-        request["command_id"].get<std::string>().size() > kMaxCommandIdLength) {
-        return {ResponseSerializer::error(std::nullopt, "INVALID_REQUEST",
-            "command_id is implausibly long"), false};
+        const std::optional<std::string> commandId = extractCommandId(request);
+        return {ResponseSerializer::error(commandId, "INVALID_REQUEST",
+            "Request must be a JSON object with a string \"type\" field"), false, commandId};
     }
 
     const std::string type = request["type"].get<std::string>();
     if (type == "PING") {
-        return {buildPong(), false};
+        return {buildPong(), false, std::nullopt};
     }
 
     if (type == "PRINT") {
-        return {ResponseSerializer::printBook(processor_.orderBook(), extractCommandId(request)),
-            false};
+        const std::optional<std::string> commandId = extractCommandId(request);
+        return {ResponseSerializer::printBook(processor_.orderBook(), commandId), false,
+            commandId};
     }
 
     if (type == "ADD" || type == "CANCEL" || type == "MODIFY") {
@@ -200,8 +206,11 @@ RouteResult RequestRouter::handle(const std::string& payload) const {
     // что и по-настоящему неизвестная команда. type в тексте message
     // усекается: это пояснение для человека, а не идентификатор, который
     // клиенту нужно сопоставить с запросом.
-    return {ResponseSerializer::error(extractCommandId(request), "INVALID_REQUEST",
-        "Unknown command type: " + truncateForMessage(type, kMaxTypeInMessageLength)), false};
+    const std::optional<std::string> commandId = extractCommandId(request);
+    return {ResponseSerializer::error(commandId, "INVALID_REQUEST",
+        "Unknown command type: " +
+            ResponseSerializer::truncateUtf8(type, kMaxTypeInMessageLength)),
+        false, commandId};
 }
 
 }

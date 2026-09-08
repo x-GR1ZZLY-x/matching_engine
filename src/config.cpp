@@ -1,5 +1,6 @@
 #include"config.hpp"
 #include"exceptions.hpp"
+#include"response_serializer.hpp"
 #include<cstdint>
 #include<cstdlib>
 #include<fstream>
@@ -8,6 +9,19 @@
 #include<nlohmann/json.hpp>
 
 namespace matching_engine{
+
+// Нижняя граница server.max_message_size (docs/task4/02-network-protocol.md,
+// раздел 4.1). Решение "ответ, который не поместился, отвечает
+// RESPONSE_TOO_LARGE и держит соединение живым" работает, только если
+// короткий ответ об ошибке помещается в лимит всегда — иначе сервер не мог
+// бы сообщить об ошибке вообще. Значение берётся из
+// ResponseSerializer::maxErrorResponseSize() — она вызывает настоящую
+// error() на заведомо худшем входе, а не собирает JSON вручную здесь: так
+// граница не может разойтись с тем, что реально шлёт сериализатор при
+// следующей правке его формата.
+std::size_t minMaxMessageSize(){
+    return ResponseSerializer::maxErrorResponseSize();
+}
 
 namespace{
 
@@ -80,9 +94,11 @@ std::size_t requireMaxMessageSize(const nlohmann::json& section, const std::stri
     const long long value = requireNonNegativeInt(section, sectionName, field, configPath);
     constexpr long long maxAllowed =
         static_cast<long long>(std::numeric_limits<std::uint32_t>::max());
-    if(value < 1 || value > maxAllowed){
+    const long long minAllowed = static_cast<long long>(minMaxMessageSize());
+    if(value < minAllowed || value > maxAllowed){
         throw ConfigError("Config file '" + configPath + "' field '" + sectionName + "." +
-            field + "' must be between 1 and " + std::to_string(maxAllowed));
+            field + "' must be between " + std::to_string(minAllowed) + " and " +
+            std::to_string(maxAllowed));
     }
     return static_cast<std::size_t>(value);
 }

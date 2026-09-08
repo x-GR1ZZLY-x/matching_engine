@@ -13,8 +13,9 @@ bool parseServerArgs(int argc, char** argv, std::string& configPath,
 
 // Разбор argv для matching-engine-client. Ключи "--host <адрес>" и
 // "--port <номер>" обязательны оба. Возвращает false при отсутствующем
-// значении, неизвестном аргументе либо отсутствии обязательного ключа —
-// тогда errorMessage содержит текст ошибки.
+// значении, неизвестном аргументе, отсутствии обязательного ключа либо
+// нечисловом или выходящем за диапазон TCP-портов (0..65535) значении
+// "--port" — тогда errorMessage содержит текст ошибки.
 bool parseClientArgs(int argc, char** argv, std::string& host, std::string& port,
     std::string& errorMessage);
 
