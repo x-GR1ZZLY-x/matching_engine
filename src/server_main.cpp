@@ -11,13 +11,13 @@
 #include"request_router.hpp"
 #include"schema.hpp"
 #include"server.hpp"
+#include"signal_handler.hpp"
 
-// Серверный бинарник (REQ-NET-12): поднимает TCP-сервис и обслуживает
-// соединения до тех пор, пока io_context не остановится сам. Сигнальный
-// поток и graceful shutdown по SIGTERM/SIGINT появляются в задаче 08 —
-// сейчас у процесса ещё нет собственного штатного способа завершиться,
-// кроме внешнего сигнала операционной системы, который здесь не
-// перехватывается.
+// Серверный бинарник (REQ-NET-12): поднимает TCP-сервис, обслуживает
+// соединения и останавливается штатно по SIGTERM/SIGINT (docs/task4/
+// 01-service-lifecycle.md) — главный поток крутит io_context, отдельный
+// сигнальный поток (SignalHandler) ждёт сигналы остановки и передаёт запрос
+// через post().
 //
 // В серверном бинарнике std::cout не используется вообще: результат
 // работы уходит клиенту в сокет, а оба стандартных потока отданы под
@@ -25,6 +25,19 @@
 // в journal.
 int main(int argc, char** argv){
     using namespace matching_engine;
+
+    // Первым действием процесса, до разбора аргументов и до создания
+    // каких-либо потоков (раздел 2.1, 2.3 документа): SIGTERM, SIGINT и
+    // SIGUSR1 блокируются в маске главного потока, и созданный позже
+    // сигнальный поток унаследует её. Без этого сигнал, пришедший во время
+    // долгого подключения к БД или восстановления книги, выполнил бы
+    // действие по умолчанию и убил бы процесс на середине запуска.
+    if (!SignalHandler::blockSignals()) {
+        // Сообщение об ошибке уже написано в журнал внутри blockSignals();
+        // без рабочей маски вся схема остановки не работает — продолжать
+        // запуск нет смысла (раздел 4.4 документа).
+        return 1;
+    }
 
     std::string configPath;
     std::string errorMessage;
@@ -89,6 +102,17 @@ int main(int argc, char** argv){
     // boost::system::system_error, который ничем из перечисленного выше не
     // перехватывается и без этого try/catch дошёл бы до std::terminate.
     bool fatalError = false;
+    bool forcedShutdown = false;
+    // Взводится onFailure сигнального потока (см. SignalHandler ниже) при
+    // отказе самого сигнального потока (ожидание сигналов вернуло ошибку,
+    // из тела потока вылетело исключение) — без этого признака такой отказ
+    // неотличим снаружи от штатной остановки по SIGTERM и main вернул бы 0
+    // (REQ-THR-12, раздел 4.4 документа). Обычный bool, не std::atomic:
+    // запись происходит в сигнальном потоке, а чтение — ниже, уже после
+    // разрушения signalHandler (то есть после join()), и happens-before
+    // между записью и чтением обеспечивает присоединение потока — та же
+    // схема, что и у hadFatalError()/wasForceStopped().
+    bool signalThreadFailed = false;
     try {
         Server server(ioContext, config.server, router);
 
@@ -97,8 +121,30 @@ int main(int argc, char** argv){
         // принимать соединения.
         server.start();
 
+        // Сигнальный поток создаётся после Server (раздел 1.3, 5.4
+        // документа): промежуток между блокировкой маски (самое начало
+        // main) и этим местом занимает подключение к БД, применение схемы,
+        // восстановление книги и прогрев кеша — сигнал, пришедший в это
+        // время, остаётся в очереди отложенных сигналов процесса и
+        // достаётся сигнальному потоку сразу после его запуска (раздел 2.3).
+        // onStop делает ровно то же, что документ предписывает сигнальному
+        // потоку: единственная операция, которую он выполняет над
+        // состоянием сервера, — post() в io_context (Server::stop() сам
+        // является этим post()).
+        //
+        // Порядок объявления существен и здесь: signalHandler объявлен
+        // после server, поэтому разрушается первым — сигнальный поток
+        // присоединяется раньше, чем начнёт разрушаться Server, а Server, в
+        // свою очередь, раньше, чем ioContext, объявленный выше try (раздел
+        // 1.3 документа).
+        SignalHandler signalHandler(
+            [&server] { server.stop(); },
+            [&signalThreadFailed] { signalThreadFailed = true; });
+
         ioContext.run();
         fatalError = server.hadFatalError();
+        forcedShutdown = server.wasForceStopped();
+        Logger::instance().info("Event loop stopped");
     } catch (const std::exception& e) {
         Logger::instance().error(std::string("Server error: ") + e.what());
         return 1;
@@ -115,5 +161,25 @@ int main(int argc, char** argv){
         return 1;
     }
 
+    // Принудительное завершение по истечении предельного времени остановки
+    // тоже даёт ненулевой код (раздел 4.4 документа): это признак дефекта
+    // (незавершённая операция, которую drain не закрыл), а не обычной
+    // остановки, и оператор обязан увидеть это в состоянии службы.
+    if (forcedShutdown) {
+        Logger::instance().error("Shutdown deadline exceeded, stopped forcibly");
+        return 1;
+    }
+
+    // signalThreadFailed читается здесь, а не раньше: к этому месту
+    // signalHandler уже разрушен (конец try-блока выше), то есть SIGUSR1
+    // послан и join() завершился — присоединение потока и есть
+    // happens-before, на который опирается чтение обычного bool, записанного
+    // в другом потоке (раздел 4.4 документа, REQ-THR-12).
+    if (signalThreadFailed) {
+        Logger::instance().error("Signal thread failed, exiting with a non-zero status");
+        return 1;
+    }
+
+    Logger::instance().info("Server stopped");
     return 0;
 }

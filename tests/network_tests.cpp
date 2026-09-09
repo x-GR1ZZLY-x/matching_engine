@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <cstddef>
+#include <cstdlib>
 #include <functional>
 #include <future>
 #include <string>
@@ -439,29 +440,52 @@ TEST(NetworkTest, ClientDisconnectWithoutReadingResponseDoesNotCrashServer) {
     EXPECT_EQ(response.at("result"), "PONG");
 }
 
-// Прямой вызов Server::stop() (REQ-NET-08): закрывает
-// acceptor, новые подключения больше не принимаются, но уже открытая
-// сессия продолжает отвечать — stop() не трогает существующие соединения.
-TEST(NetworkTest, StopClosesAcceptorButExistingSessionKeepsWorking) {
+// Прямой вызов Server::stop() (REQ-NET-08, docs/task4/
+// 01-service-lifecycle.md, раздел 4.1): закрывает acceptor — новые
+// подключения больше не принимаются, — и обходит реестр живых сессий,
+// прося каждую закрыться (шаг 5 раздела 4.1, REQ-EXT-08). Раньше stop()
+// трогал только acceptor, и существующая сессия продолжала
+// работать; с обходом реестра это поведение стало намеренно другим — сама
+// суть graceful drain в том, что stop() закрывает и уже принятые
+// соединения, а не только вход для новых. У сессии из этого теста очередь
+// записи пуста в момент остановки (последний обмен уже завершён), поэтому
+// beginClose() закрывает её сокет немедленно; поведение с непустой
+// очередью (ответ дописывается до конца перед закрытием) отдельно проверяет
+// NetworkTest.StopSendsQueuedResponseBeforeClosingSocket.
+TEST(NetworkTest, StopClosesAcceptorAndDrainsExistingSession) {
     TestServer testServer(1024);
 
     Client client(1024);
     client.connect("127.0.0.1", testServer.port());
 
     // Первый обмен подтверждает, что соединение уже полностью принято
-    // сервером (async_accept отработал, Session::start() запущен) до того,
-    // как acceptor будет закрыт. Без этого round trip'а TCP-рукопожатие на
-    // уровне ОС могло бы завершиться раньше, чем сервер успел вызвать
-    // accept(), и закрытие слушающего сокета оборвало бы ещё не принятое
-    // соединение той же ошибкой, что и настоящий сбой.
+    // сервером (async_accept отработал, Session::start() запущен) и что
+    // сессия успела вернуться к чтению следующего кадра с пустой очередью
+    // записи до того, как сервер будет остановлен.
     const nlohmann::json warmup = client.request(nlohmann::json::parse(R"({"type":"PING"})"));
     ASSERT_EQ(warmup.at("status"), "OK");
 
     testServer.server.stop();
 
-    const nlohmann::json pong = client.request(nlohmann::json::parse(R"({"type":"PING"})"));
-    EXPECT_EQ(pong.at("status"), "OK");
-    EXPECT_EQ(pong.at("result"), "PONG");
+    // stop() лишь ставит задачу через post — сам по себе он не гарантирует,
+    // что сетевой поток успел её обработать. Маркер, протолкнутый через тот
+    // же io_context следом, доказывает это: обработчики выполняются в
+    // порядке очереди, поэтому возврат runInIoContext означает, что
+    // обработчик stop() уже отработал. Без этого тест зависел бы от гонки —
+    // на медленном сетевом потоке он падал бы и на исправном коде.
+    runInIoContext(testServer, [] {});
+
+    // Сессия закрыта остановкой сервера — следующий запрос на этом же
+    // соединении обязан провалиться обрывом, а не получить ответ и не
+    // повиснуть до таймаута.
+    try {
+        client.request(nlohmann::json::parse(R"({"type":"PING"})"));
+        FAIL() << "сессия обязана была закрыться при остановке сервера";
+    } catch (const NetworkTimeoutError&) {
+        FAIL() << "соединение осталось открытым: остановка не закрыла существующую сессию";
+    } catch (const NetworkError&) {
+        SUCCEED();
+    }
 
     // NetworkTimeoutError наследует NetworkError, поэтому EXPECT_THROW с
     // базовым типом пропустил бы регрессию, при которой acceptor не закрыт
@@ -1180,4 +1204,454 @@ TEST(NetworkTest, ConnectToClosedPortFailsWithConnectionErrorNotTimeout) {
     } catch (const NetworkError&) {
         SUCCEED();
     }
+}
+
+// Graceful shutdown (docs/task4/01-service-lifecycle.md). Сервер поднят
+// вручную (не через TestServer, чей деструктор форсирует
+// io_context::stop() — здесь ровно это принудительное вмешательство и
+// проверяется как отдельная, наблюдаемая величина, а не смешивается с
+// обычной остановкой теста).
+
+// Критерии 9, 10, 14 (раздел 7.2 документа): сервер поднят в этом же
+// процессе, клиент подключён и выполнил полный обмен — сессия принята и
+// висит на чтении следующего кадра. Остановка запускается тем же путём,
+// каким её запускает сигнал (единственное, что делает сигнальный поток над
+// состоянием сервера, — Server::stop(), раздел 3 документа), и вся
+// последовательность завершения обязана уложиться в ограничение по
+// времени: io_context.run() возвращается сама, естественным исчерпанием
+// работы (шаг 7 раздела 4.1), а не по принудительному io_context::stop().
+//
+// Критерий 10 обеспечен тем, что клиент действительно подключён и выполнил
+// запрос: без этого остановка без единого соединения прошла бы успешно
+// даже в реализации, забывшей обойти реестр сессий, и тест ничего не
+// проверял бы.
+//
+// Критерий 14: инъекция — убрать обход реестра сессий из Server::stop()
+// (цикл "for (const std::weak_ptr<Session>& weak : sessions_) ...") —
+// заставляет этот тест падать по истечении ограничения времени, а не
+// висеть, потому что при исчерпании времени тест завершает свой процесс
+// принудительно (пункт 5 раздела 7.2 документа); gtest_discover_tests
+// запускает каждый тест отдельным процессом, поэтому падает только он.
+TEST(NetworkTest, StopDrainsHangingSessionWithoutDeadlock) {
+    CommandProcessor processor;
+    RequestRouter router(processor, nullptr);
+    ServerConfig config{"127.0.0.1", 0, 4096};
+    boost::asio::io_context ioContext;
+    Server server(ioContext, config, router);
+    server.start();
+
+    std::thread ioThread([&ioContext] {
+        try {
+            ioContext.run();
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "io_context::run() threw: " << e.what();
+        }
+    });
+
+    Client client(4096);
+    client.connect("127.0.0.1", server.port());
+    const nlohmann::json pong = client.request(nlohmann::json::parse(R"({"type":"PING"})"));
+    ASSERT_EQ(pong.at("status"), "OK");
+
+    // Сессия сейчас снова висит на чтении следующего кадра (readHeader()
+    // после ответа на PING) — именно это незавершённое чтение обязана
+    // закрыть остановка, чтобы io_context.run() смогла вернуться сама.
+    server.stop();
+
+    std::promise<void> stopped;
+    std::future<void> stoppedFuture = stopped.get_future();
+    std::thread joiner([&ioThread, &stopped] {
+        ioThread.join();
+        stopped.set_value();
+    });
+
+    constexpr std::chrono::seconds kTimeout(5);
+    if (stoppedFuture.wait_for(kTimeout) != std::future_status::ready) {
+        ADD_FAILURE() << "io_context::run() не вернулась за отведённое время"
+                          " — обход реестра сессий, вероятно, не выполнен";
+        // Присоединять поток, застрявший в незавершившейся run(), нельзя —
+        // это и есть зависание, от которого тест обязан отличаться падением
+        // (раздел 7.2, пункт 5 документа), а не попыткой join() заблокиро-
+        // ванного потока.
+        std::_Exit(1);
+    }
+    joiner.join();
+}
+
+// Критерий 12 (раздел 4.3 документа): по истечении предельного времени
+// остановки сетевой поток останавливает io_context принудительно —
+// наблюдаемо через Server::wasForceStopped(). Малое shutdownTimeout
+// передано явно через параметр конструктора Server, чтобы проверка не
+// ждала полные десять секунд и вообще была осуществима за разумное время;
+// значение по умолчанию документа при этом не меняется.
+//
+// Ответ на PRINT над книгой из kOrderCount заявок весит десятки мегабайт и
+// физически не помещается в буферы TCP на localhost, если клиент вообще
+// не читает, — запись остаётся незавершённой намного дольше отведённой
+// секунды. Клиент читает только 4 байта заголовка кадра-ответа перед тем,
+// как запустить остановку — этого достаточно, чтобы доказать, что сервер
+// уже начал запись (Session::writeQueue_ не пуст), и застраховаться от
+// гонки "остановка началась раньше, чем сессия вообще успела поставить
+// ответ в очередь" (тогда закрытие пустой очереди прошло бы мгновенно, и
+// принудительное завершение было бы не по адресу).
+TEST(NetworkTest, StopForcesShutdownAfterDeadlineWhenWriteNeverDrains) {
+    constexpr std::size_t kServerLimit = 32u * 1024u * 1024u;
+    CommandProcessor processor;
+
+    constexpr int kOrderCount = 100000;
+    for (int i = 0; i < kOrderCount; ++i) {
+        processor.restoreOrder(std::make_shared<Order>(
+            i + 1, Side::Buy, 100, 1, 1, i + 1, OrderStatus::Open));
+    }
+
+    RequestRouter router(processor, nullptr);
+    ServerConfig config{"127.0.0.1", 0, kServerLimit};
+    boost::asio::io_context ioContext;
+    constexpr std::chrono::seconds kShutdownTimeout(1);
+    Server server(ioContext, config, router, kShutdownTimeout);
+    server.start();
+
+    std::thread ioThread([&ioContext] {
+        try {
+            ioContext.run();
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "io_context::run() threw: " << e.what();
+        }
+    });
+
+    boost::asio::io_context clientIoContext;
+    boost::asio::ip::tcp::socket clientSocket(clientIoContext);
+    clientSocket.connect(boost::asio::ip::tcp::endpoint(
+        boost::asio::ip::make_address("127.0.0.1"), server.port()));
+
+    const MessageCodec codec(kServerLimit);
+    boost::asio::write(clientSocket, boost::asio::buffer(codec.encode(R"({"type":"PRINT"})")));
+
+    std::array<char, kFrameHeaderSize> header{};
+    boost::asio::read(clientSocket, boost::asio::buffer(header));
+
+    // Дальше клиент намеренно не читает ничего — сессия остаётся с
+    // недописанным ответом до самого конца теста.
+    server.stop();
+
+    std::promise<void> stopped;
+    std::future<void> stoppedFuture = stopped.get_future();
+    std::thread joiner([&ioThread, &stopped] {
+        ioThread.join();
+        stopped.set_value();
+    });
+
+    constexpr std::chrono::seconds kWait(10);
+    if (stoppedFuture.wait_for(kWait) != std::future_status::ready) {
+        ADD_FAILURE() << "io_context::run() не вернулась даже принудительно"
+                          " по истечении shutdownTimeout";
+        std::_Exit(1);
+    }
+    joiner.join();
+
+    EXPECT_TRUE(server.wasForceStopped());
+
+    boost::system::error_code ignored;
+    clientSocket.close(ignored);
+}
+
+// Критерий 11 (раздел 4.1, шаг 6 документа): сессия с непустой очередью
+// записи в момент остановки обязана отправить уже накопленный ответ до
+// закрытия сокета, а не оборваться на середине. Тот же приём
+// синхронизации, что и в тесте принудительного завершения выше: клиент
+// читает только 4 байта заголовка, доказывая, что сервер уже начал запись,
+// и лишь затем запускает остановку — иначе можно было бы случайно
+// остановить сервер до того, как сессия вообще поставила ответ в очередь,
+// и тест проверял бы пустую очередь, а не непустую.
+TEST(NetworkTest, StopSendsQueuedResponseBeforeClosingSocket) {
+    constexpr std::size_t kServerLimit = 2u * 1024u * 1024u;
+    TestServer testServer(kServerLimit);
+
+    constexpr int kOrderCount = 15000;
+    runInIoContext(testServer, [&testServer] {
+        for (int i = 0; i < kOrderCount; ++i) {
+            testServer.processor.restoreOrder(std::make_shared<Order>(
+                i + 1, Side::Buy, 100, 1, 1, i + 1, OrderStatus::Open));
+        }
+    });
+
+    boost::asio::io_context rawIoContext;
+    boost::asio::ip::tcp::socket rawSocket(rawIoContext);
+    rawSocket.connect(boost::asio::ip::tcp::endpoint(
+        boost::asio::ip::make_address("127.0.0.1"), testServer.port()));
+
+    const MessageCodec codec(kServerLimit);
+    boost::asio::write(rawSocket, boost::asio::buffer(codec.encode(R"({"type":"PRINT"})")));
+
+    std::array<char, kFrameHeaderSize> header{};
+    boost::asio::read(rawSocket, boost::asio::buffer(header));
+    const std::uint32_t bodySize = codec.decodeHeader(header);
+
+    // Очередь записи этой сессии на этот момент заведомо не пуста: доставлены
+    // только четыре байта заголовка, а тело ответа — сотни килобайт.
+    testServer.server.stop();
+
+    // Дочитывание тела и проверка закрытия сокета — блокирующие
+    // синхронные операции, которые не оборвать снаружи; правило ТЗ требует,
+    // чтобы каждый сетевой тест падал, а не висел, если сервер не пришлёт
+    // накопленный ответ (например, из-за регрессии, ломающей drain). Тот же
+    // приём, что и в StopDrainsHangingSessionWithoutDeadlock: работа — во
+    // вспомогательном потоке, ожидание — с ограничением по времени, при
+    // исчерпании — падение и принудительный выход без попытки присоединить
+    // застрявший поток.
+    std::promise<void> done;
+    std::future<void> doneFuture = done.get_future();
+    std::thread reader([&rawSocket, bodySize, kOrderCount, &done] {
+        std::string body(bodySize, '\0');
+        boost::asio::read(rawSocket, boost::asio::buffer(body));
+        const nlohmann::json response = nlohmann::json::parse(body);
+        EXPECT_EQ(response.at("status"), "OK");
+        EXPECT_EQ(response.at("result").at("buy").size(), static_cast<std::size_t>(kOrderCount));
+
+        // Ответ доставлен целиком — сокет закрыт сервером сразу после него:
+        // drain отработал по документу, а не оборвал соединение раньше
+        // времени.
+        char extra = 0;
+        boost::system::error_code ec;
+        const std::size_t transferred =
+            boost::asio::read(rawSocket, boost::asio::buffer(&extra, 1), ec);
+        EXPECT_EQ(transferred, 0u);
+        EXPECT_TRUE(ec);
+        done.set_value();
+    });
+
+    constexpr std::chrono::seconds kTimeout(10);
+    if (doneFuture.wait_for(kTimeout) != std::future_status::ready) {
+        ADD_FAILURE() << "сервер не прислал накопленный ответ и не закрыл сокет"
+                          " за отведённое время";
+        std::_Exit(1);
+    }
+    reader.join();
+}
+
+// Session::readBody() безусловно вызывал readHeader() в конце, поэтому
+// клиент, посылающий команды конвейером, не давал очереди записи опустеть —
+// сессия жила до истечения предельного времени, и остановка становилась
+// принудительной (REQ-THR-11, REQ-EXT-08). Тест воспроизводит этот сценарий:
+// конвейер команд отправляется уже после stop(), пока сессия ещё дописывает
+// предыдущий большой ответ. Ответ на PRINT над kOrderCount заявками (тот же
+// размер книги, что и в StopForcesShutdownAfterDeadlineWhenWriteNeverDrains
+// выше) весит несколько мегабайт и не помещается в буферы TCP на localhost,
+// пока клиент его не читает, — это даёт заведомо широкое окно, в течение
+// которого до фикса конвейер успел бы быть прочитан и обработан целиком.
+TEST(NetworkTest, SessionDoesNotServePipelinedCommandsSentAfterStopBegins) {
+    constexpr std::size_t kServerLimit = 32u * 1024u * 1024u;
+    CommandProcessor processor;
+
+    constexpr int kOrderCount = 100000;
+    for (int i = 0; i < kOrderCount; ++i) {
+        processor.restoreOrder(std::make_shared<Order>(
+            i + 1, Side::Buy, 100, 1, 1, i + 1, OrderStatus::Open));
+    }
+
+    RequestRouter router(processor, nullptr);
+    ServerConfig config{"127.0.0.1", 0, kServerLimit};
+    boost::asio::io_context ioContext;
+    Server server(ioContext, config, router);
+    server.start();
+
+    std::thread ioThread([&ioContext] {
+        try {
+            ioContext.run();
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "io_context::run() threw: " << e.what();
+        }
+    });
+
+    boost::asio::io_context clientIoContext;
+    boost::asio::ip::tcp::socket clientSocket(clientIoContext);
+    clientSocket.connect(boost::asio::ip::tcp::endpoint(
+        boost::asio::ip::make_address("127.0.0.1"), server.port()));
+
+    const MessageCodec codec(kServerLimit);
+    boost::asio::write(clientSocket, boost::asio::buffer(codec.encode(R"({"type":"PRINT"})")));
+
+    std::array<char, kFrameHeaderSize> header{};
+    boost::asio::read(clientSocket, boost::asio::buffer(header));
+
+    // Очередь записи этой сессии заведомо не пуста (доставлены только
+    // четыре байта заголовка из нескольких мегабайт тела, а клиент дальше
+    // пока ничего не читает) — beginClose() внутри stop() взводит
+    // closeAfterWrite_ вместо немедленного закрытия сокета (раздел 4.1
+    // документа, шаг 6). readHeader() для следующего кадра к этому моменту
+    // уже вызван — readBody() запускает его сразу после обработки PRINT, не
+    // дожидаясь окончания записи ответа, — это и есть единственное чтение,
+    // уже стоявшее в очереди на момент решения об остановке.
+    server.stop();
+
+    // stop() лишь ставит задачу через post; без ожидания её обработки
+    // следующий шаг (отправка конвейера) мог бы состояться до того, как
+    // сетевой поток выполнит beginClose() и взведёт closeAfterWrite_, — и
+    // тест падал бы на медленном сетевом потоке даже на исправном коде.
+    // Обработчики io_context выполняются в порядке очереди, поэтому возврат
+    // этого маркера доказывает, что обработчик stop() уже отработал (тот же
+    // приём, что и runInIoContext, здесь — на локальном ioContext, к
+    // которому у TestServer доступа нет).
+    {
+        std::promise<void> stopProcessed;
+        std::future<void> stopProcessedFuture = stopProcessed.get_future();
+        boost::asio::post(ioContext, [&stopProcessed] { stopProcessed.set_value(); });
+        constexpr std::chrono::seconds kStopTimeout(5);
+        if (stopProcessedFuture.wait_for(kStopTimeout) != std::future_status::ready) {
+            ADD_FAILURE() << "остановка сервера не была обработана io_context за отведённое время";
+            std::_Exit(1);
+        }
+    }
+
+    // Конвейер команд, отправленных после решения об остановке: до фикса
+    // сессия обслужила бы их все одну за другой (данные уже лежат в
+    // приёмном буфере сервера, а сам ответ на PRINT ещё не начал
+    // опустошаться — клиент его не читает), не давая очереди записи
+    // опустеть. Отправляем заведомо больше одной — фикс обязан ограничить
+    // число обслуженных сверху единицей (тем чтением, что уже стояло в
+    // очереди на момент stop()), а не оставить цикл безусловным.
+    constexpr int kPipelinedCount = 20;
+    for (int i = 0; i < kPipelinedCount; ++i) {
+        boost::asio::write(clientSocket, boost::asio::buffer(codec.encode(R"({"type":"PING"})")));
+    }
+
+    // Только теперь начинаем читать оставшееся — до этого момента сокет
+    // намеренно не читался дальше заголовка. Сервер намеренно не
+    // дочитывает конвейер, отправленный после stop() (в этом и состоит
+    // фикс), и закрывает сокет с непрочитанными байтами на своей приёмной
+    // стороне; такое закрытие штатно даёт клиенту обрыв (RST), а не
+    // аккуратный FIN, поэтому границы кадров после обрыва не
+    // восстанавливаются и разбирать поток как последовательность кадров
+    // нельзя. Считать сырые байты тоже бессмысленно: тело ответа на PRINT
+    // занимает мегабайты и по шагу 6 раздела 4.1 документа обязано быть
+    // дописано целиком, поэтому по их числу обслуженные PONG'и не отличить
+    // от легитимного ответа. Показательно другое: сколько раз в потоке
+    // встретилось слово PONG — снимок книги заявок его не содержит, а
+    // каждый обслуженный PING даёт ровно одно вхождение.
+    std::promise<std::string> receivedPromise;
+    std::future<std::string> receivedFuture = receivedPromise.get_future();
+    std::thread reader([&clientSocket, &receivedPromise] {
+        std::vector<char> buffer(1u << 20);
+        std::string received;
+        boost::system::error_code ec;
+        while (!ec) {
+            const std::size_t transferred = clientSocket.read_some(boost::asio::buffer(buffer), ec);
+            received.append(buffer.data(), transferred);
+        }
+        receivedPromise.set_value(std::move(received));
+    });
+
+    constexpr std::chrono::seconds kTimeout(10);
+    if (receivedFuture.wait_for(kTimeout) != std::future_status::ready) {
+        ADD_FAILURE() << "сокет не закрылся после конвейера команд, отправленного"
+                          " после начала остановки";
+        std::_Exit(1);
+    }
+    reader.join();
+
+    std::promise<void> stopped;
+    std::future<void> stoppedFuture = stopped.get_future();
+    std::thread joiner([&ioThread, &stopped] {
+        ioThread.join();
+        stopped.set_value();
+    });
+    if (stoppedFuture.wait_for(kTimeout) != std::future_status::ready) {
+        ADD_FAILURE() << "io_context::run() не вернулась за отведённое время";
+        std::_Exit(1);
+    }
+    joiner.join();
+
+    // До фикса сессия обслуживала бы весь конвейер: данные уже ждали в
+    // приёмном буфере, и каждый следующий readHeader() вызывался
+    // безусловно, — то есть в потоке нашлось бы kPipelinedCount вхождений
+    // PONG. После фикса их не больше одного: единственное чтение, уже
+    // стоявшее в очереди на момент stop() (REQ-THR-11, REQ-EXT-08). Ноль —
+    // тоже корректный исход: то чтение могло не успеть получить кадр
+    // целиком до закрытия сокета.
+    //
+    // Отдельно проверяется, что передача вообще состоялась: обрыв при
+    // close() с непрочитанными байтами в приёмном буфере штатно может
+    // забрать в RST хвост уже отправленного тела PRINT, поэтому точный
+    // размер здесь не проверяется — только то, что соединение не оборвалось
+    // мгновенно, не передав ничего.
+    const std::string received = receivedFuture.get();
+    std::size_t pongCount = 0;
+    for (std::size_t pos = received.find("PONG"); pos != std::string::npos;
+         pos = received.find("PONG", pos + 1)) {
+        ++pongCount;
+    }
+
+    EXPECT_GE(received.size() + kFrameHeaderSize, std::size_t{4096})
+        << "соединение оборвалось почти сразу, ничего толком не передав";
+    EXPECT_LE(pongCount, std::size_t{1})
+        << "обслужено " << pongCount << " команд конвейера из " << kPipelinedCount
+        << ", а после начала остановки допустима максимум одна — та, чьё чтение"
+           " уже стояло в очереди на момент stop()";
+
+    boost::system::error_code ignored;
+    clientSocket.close(ignored);
+}
+
+// Критерий 13 (docs/task4/02-network-protocol.md, раздел 4.1, подраздел
+// "Изменяющая команда: команда выполнена, ответ не доставлен"). Заявка,
+// заведённая ниже, сопоставляется сразу против kSellOrderCount книжных
+// заявок — ответ на неё несёт столько же сделок и заведомо не помещается в
+// kServerLimit, а сам запрос (несколько десятков байт) — помещается
+// свободно.
+TEST(NetworkTest, ResponseTooLargeOnCompletedAddSaysCommandWasSaved) {
+    auto connOpt = tryConnect();
+    if (!connOpt) {
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    cleanupAllTables(*connOpt);
+
+    constexpr std::size_t kServerLimit = 4096;
+    TestServer testServer(kServerLimit, &*connOpt);
+
+    // sequenceNumber восстановленных заявок взят заведомо больше любого,
+    // который SequenceGenerator (singleton, в этом тестовом процессе ещё ни
+    // разу не вызывался) выдаст самой новой заявке ниже: restoreOrder кладёт
+    // заявки в книгу мимо генератора и мимо БД, а sequence_number в таблице
+    // orders уникален — коллизия с первым же вызовом генератора (обычно 1)
+    // иначе оборвала бы сохранение уникальным нарушением ключа.
+    constexpr int kSellOrderCount = 200;
+    constexpr long long kRestoredSequenceBase = 1000000;
+    runInIoContext(testServer, [&testServer] {
+        for (int i = 0; i < kSellOrderCount; ++i) {
+            testServer.processor.restoreOrder(std::make_shared<Order>(
+                i + 1, Side::Sell, 100, 1, 1, kRestoredSequenceBase + i, OrderStatus::Open));
+        }
+    });
+
+    Client client(kServerLimit * 20);
+    client.connect("127.0.0.1", testServer.port());
+
+    nlohmann::json add;
+    add["type"] = "ADD";
+    add["order_id"] = 100001;
+    add["side"] = "BUY";
+    add["price"] = 100;
+    add["quantity"] = kSellOrderCount;
+    add["command_id"] = "cmd-response-too-large";
+
+    const nlohmann::json response = client.request(add);
+    EXPECT_EQ(response.at("status"), "ERROR");
+    EXPECT_EQ(response.at("error"), "RESPONSE_TOO_LARGE");
+    ASSERT_TRUE(response.at("message").is_string());
+    const std::string message = response.at("message").get<std::string>();
+    // Формулировка обязана исключать ложный вывод "заявка не принята":
+    // должно быть явно сказано, что команда выполнена и сохранена.
+    EXPECT_NE(message.find("executed"), std::string::npos) << message;
+    EXPECT_NE(message.find("saved"), std::string::npos) << message;
+
+    // Соединение осталось живым — ошибка пользователя его не разрывает.
+    const nlohmann::json pong = client.request(nlohmann::json::parse(R"({"type":"PING"})"));
+    EXPECT_EQ(pong.at("status"), "OK");
+
+    // Команда действительно выполнена и сохранена, как и утверждает
+    // сообщение: сделки в БД есть, несмотря на то что клиент их не увидел.
+    PgResult tradeCount = connOpt->execute(
+        "SELECT COUNT(*) FROM trades WHERE buy_order_id = $1", {std::optional<std::string>("100001")});
+    ASSERT_EQ(tradeCount.rowCount(), 1);
+    EXPECT_EQ(tradeCount.getValue(0, 0), std::to_string(kSellOrderCount));
 }

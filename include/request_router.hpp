@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <optional>
 #include <string>
 
@@ -47,6 +48,18 @@ struct RouteResult {
     // (docs/task4/02-network-protocol.md, раздел 3.5) — не разбирая payload
     // обратно в JSON ради одного поля.
     std::optional<std::string> commandId;
+
+    // Заполняется только на успешном выполнении изменяющей команды
+    // (ADD/CANCEL/MODIFY) — той же веткой, что строит payload через
+    // ResponseSerializer::success(). Нужен Session отдельно от payload по
+    // той же причине, что и commandId выше: если этот самый payload не
+    // помещается в max_message_size, отдельного случая для успешно
+    // выполненной изменяющей команды раздел 4.1 контракта требует
+    // сообщить клиенту явно, что команда выполнена и сохранена, а не
+    // потеряна, — и записать в журнал command_id, order_id и число сделок,
+    // не разбирая уже отброшенный payload обратно в JSON.
+    std::optional<int> orderId;
+    std::size_t tradesCount = 0;
 };
 
 class RequestRouter {

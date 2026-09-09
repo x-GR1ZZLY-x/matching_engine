@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <memory>
 #include <vector>
 
@@ -26,7 +27,15 @@ namespace matching_engine {
 // последним шагом, уже после восстановления книги и прогрева кеша.
 class Server {
 public:
-    Server(boost::asio::io_context& ioContext, const ServerConfig& config, RequestRouter& router);
+    // shutdownTimeout — предельное время graceful shutdown (docs/task4/
+    // 01-service-lifecycle.md, раздел 4.3): по его истечении сетевой поток
+    // принудительно останавливает io_context, не дожидаясь незавершённых
+    // операций. Документ фиксирует значение по умолчанию в 10 секунд;
+    // параметром конструктора оно сделано ровно для того, чтобы тесты
+    // могли проверить принудительное завершение, не ожидая все десять
+    // секунд, — значение по умолчанию менять не нужно и не следует.
+    Server(boost::asio::io_context& ioContext, const ServerConfig& config,
+        RequestRouter& router, std::chrono::seconds shutdownTimeout = std::chrono::seconds(10));
 
     // Сообщает о готовности строкой "Listening on <адрес>:<порт>"
     // (REQ-NET-13) и начинает принимать соединения. Вызывающая сторона
@@ -37,10 +46,16 @@ public:
 
     // Безопасен для вызова из другого потока (сигнальный поток,
     // обрабатывающий SIGTERM/SIGINT согласно REQ-THR-04, поток теста,
-    // крутящий io_context сервера): закрытие acceptor'а
-    // переносится в io_context через post, а не выполняется напрямую —
-    // acceptor не потокобезопасен сам по себе, но post в его собственный
-    // io_context is thread-safe по контракту Asio.
+    // крутящий io_context сервера): вся работа переносится в io_context
+    // через post, а не выполняется напрямую — acceptor, реестр сессий и
+    // таймер не потокобезопасны сами по себе, но post в собственный
+    // io_context thread-safe по контракту Asio. Выполняет шаги 3-6 раздела
+    // 4.1 документа: закрывает acceptor, запускает таймер предельного
+    // времени остановки и просит закрыться каждую живую сессию — после
+    // этого дальнейших асинхронных операций никто не запускает, и
+    // io_context.run() возвращается сама, как только текущие операции
+    // доработают (шаг 7). Идемпотентен: повторный вызов (повторный
+    // SIGTERM) повторяет те же действия без вреда.
     void stop();
 
     // Порт, на котором реально начал слушать acceptor — при config.port
@@ -55,6 +70,12 @@ public:
     // как io_context.run() вернётся.
     bool hadFatalError() const noexcept { return fatalError_; }
 
+    // Взводится, если graceful shutdown не уложился в shutdownTimeout и
+    // сетевой поток остановил io_context принудительно (раздел 4.3
+    // документа) — вызывающая сторона обязана завершить процесс с
+    // ненулевым кодом (раздел 4.4).
+    bool wasForceStopped() const noexcept { return forceStopped_; }
+
 private:
     void doAccept();
 
@@ -64,6 +85,18 @@ private:
     // ниже). Вызывается только из doAccept().
     void handleAccept(boost::system::error_code ec, boost::asio::ip::tcp::socket socket);
 
+    // Опрашивает реестр сессий короткими интервалами вместо однократного
+    // ожидания всего shutdownTimeout_ одним таймером. Без этого
+    // shutdownTimer_ сам оставался бы для io_context незавершённой
+    // операцией до истечения полного срока, и штатная остановка (все
+    // сессии уже закрылись за миллисекунды) всё равно ждала бы отведённые
+    // на неё секунды целиком — то, что раздел 4.1 документа (шаг 7)
+    // называет главным свойством схемы, не выполнялось бы. Метод не
+    // требует от Session никакого уведомления о закрытии (задача этого
+    // не разрешает): опустевший реестр обнаруживается тем же способом,
+    // что и в handleAccept() — очисткой невалидных weak_ptr.
+    void scheduleDrainCheck(std::chrono::steady_clock::time_point deadline);
+
     boost::asio::io_context& ioContext_;
     boost::asio::ip::tcp::acceptor acceptor_;
     MessageCodec codec_;
@@ -72,11 +105,32 @@ private:
     unsigned short port_ = 0;
     bool fatalError_ = false;
 
+    // "Идёт остановка" (обычное поле — трогает только сетевой поток,
+    // handleAccept() и stop() выполняются в одном io_context): соединение,
+    // принятое одновременно с сигналом (async_accept успел завершиться
+    // успехом до выполнения запощенного stop()), сразу получает
+    // beginClose() вместо start(), а doAccept() не перевзводится на
+    // закрытом acceptor'е.
+    bool stopping_ = false;
+
     // Реестр живых сессий слабыми ссылками (REQ-NET-08): на время жизни
     // сессий не влияет (только shared_from_this() в самой Session
-    // управляет им), нужен будущему graceful drain (REQ-THR-11, REQ-EXT-08),
-    // чтобы достучаться до активных соединений при остановке сервера.
+    // управляет им). Первый потребитель — stop(): обходит реестр и просит
+    // каждую живую сессию закрыться (REQ-EXT-08).
     std::vector<std::weak_ptr<Session>> sessions_;
+
+    // Таймер предельного времени остановки (REQ-EXT-09) и само предельное
+    // время — оба принадлежат сетевому потоку, как и всё остальное
+    // состояние Server (раздел 5.2 документа).
+    boost::asio::steady_timer shutdownTimer_;
+    std::chrono::seconds shutdownTimeout_;
+
+    // Дедлайн вычисляется один раз, при первом входе в остановку (когда
+    // stopping_ становится true), и дальше не пересчитывается: повторный
+    // stop() (повторный SIGTERM, раздел 2.4 документа — "безвреден") иначе
+    // сдвигал бы предельное время вперёд при каждом новом сигнале.
+    std::chrono::steady_clock::time_point shutdownDeadline_{};
+    bool forceStopped_ = false;
 };
 
 }

@@ -63,6 +63,7 @@ add_library(
     src/session.cpp
     src/server.cpp
     src/client.cpp
+    src/signal_handler.cpp
 )
 
 target_include_directories(
@@ -137,6 +138,7 @@ add_executable(
     tests/message_codec_tests.cpp
     tests/request_router_tests.cpp
     tests/network_tests.cpp
+    tests/signal_handler_tests.cpp
 )
 
 target_include_directories(

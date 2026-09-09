@@ -118,7 +118,15 @@ RouteResult RequestRouter::handleDomainCommand(const nlohmann::json& request) co
 
     try {
         const ExecutionResult result = processor_.process(*command, *connection_);
-        return {ResponseSerializer::success(commandId, orderId, result), false, commandId};
+        RouteResult route{
+            ResponseSerializer::success(commandId, orderId, result), false, commandId};
+        // Нужны Session на случай, если сам этот payload не поместится в
+        // max_message_size (docs/task4/02-network-protocol.md, раздел 4.1,
+        // "Изменяющая команда: команда выполнена, ответ не доставлен") —
+        // команда к этому моменту уже выполнена и сохранена в БД.
+        route.orderId = orderId;
+        route.tradesCount = result.trades.size();
+        return route;
     } catch (const PersistenceError& e) {
         // Книга в памяти уже изменена (движок отработал до броска
         // исключения), а запись в БД не удалась — продолжать обслуживание

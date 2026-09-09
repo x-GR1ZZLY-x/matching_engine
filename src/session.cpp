@@ -105,13 +105,36 @@ void Session::readBody(std::uint32_t payloadSize) {
                     fatalAfterWrite_ = true;
                     closeAfterWrite_ = true;
                 }
+
+                // routed.orderId заполнен только на успешно выполненной
+                // изменяющей команде (RequestRouter::handleDomainCommand):
+                // заявка уже сопоставлена, сделки записаны, транзакция
+                // закоммичена — потерялся только этот конкретный ответ
+                // (docs/task4/02-network-protocol.md, раздел 4.1,
+                // "Изменяющая команда: команда выполнена, ответ не
+                // доставлен"). message обязан явно сообщать об этом, а не
+                // выглядеть как отказ: клиент, увидевший обычный ERROR,
+                // разумно решил бы, что заявка не принята, и отправил бы её
+                // заново с новым command_id — идемпотентность от дубля не
+                // защищает.
+                std::string message = "Response payload exceeds max_message_size";
+                if (routed.orderId.has_value()) {
+                    message = "Command executed and saved successfully, "
+                              "but the response payload exceeds max_message_size";
+                    Logger::instance().error(
+                        "RESPONSE_TOO_LARGE for a completed command: command_id=" +
+                        (routed.commandId ? *routed.commandId : std::string("<none>")) +
+                        " order_id=" + std::to_string(*routed.orderId) +
+                        " trades=" + std::to_string(routed.tradesCount));
+                }
+
                 try {
                     // routed.commandId — то же эхо, что уже было в
                     // payload'е, который не поместился (раздел 3.5): запрос
                     // прочитан целиком, эхировать есть что, в отличие от
                     // MESSAGE_TOO_LARGE выше, где тела ещё не было.
-                    enqueueResponse(ResponseSerializer::error(routed.commandId,
-                        "RESPONSE_TOO_LARGE", "Response payload exceeds max_message_size"));
+                    enqueueResponse(
+                        ResponseSerializer::error(routed.commandId, "RESPONSE_TOO_LARGE", message));
                 } catch (const MessageTooLargeError&) {
                     // Предел настолько мал, что даже это короткое сообщение
                     // не помещается. loadConfig отвергает такую
@@ -126,7 +149,13 @@ void Session::readBody(std::uint32_t payloadSize) {
                     notifyFatalShutdown();
                     return;
                 }
-                if (!routed.fatal) {
+                // closeAfterWrite_ уже означает "читать больше нечего" —
+                // взведён либо только что (routed.fatal), либо снаружи,
+                // beginClose() при остановке сервера (docs/task4/
+                // 01-service-lifecycle.md, раздел 4.1, шаг 6): новый кадр в
+                // этом случае не читаем, иначе конвейер команд от клиента не
+                // даёт очереди записи опустеть (REQ-THR-11, REQ-EXT-08).
+                if (!routed.fatal && !closeAfterWrite_) {
                     readHeader();
                 }
                 return;
@@ -156,8 +185,44 @@ void Session::readBody(std::uint32_t payloadSize) {
                 fatalAfterWrite_ = true;
                 return;
             }
-            readHeader();
+            // closeAfterWrite_ уже означает "читать больше нечего": чтение
+            // тела, которое сейчас обработано, было запущено раньше и могло
+            // застать очередь пустой, но снаружи — beginClose() при
+            // остановке сервера (docs/task4/01-service-lifecycle.md, раздел
+            // 4.1, шаг 6) — успел выполниться более ранний обработчик в
+            // том же io_context и взвести признак. Новый кадр в этом случае
+            // не читаем, иначе клиент, шлющий команды конвейером, не даёт
+            // очереди записи опустеть, и остановка становится принудительной
+            // (REQ-THR-11, REQ-EXT-08).
+            if (!closeAfterWrite_) {
+                readHeader();
+            }
         });
+}
+
+void Session::beginClose() {
+    // closeAfterWrite_ взводится безусловно, а не только на ветке "очередь
+    // не пуста": closeSocket() ниже отменяет лишь ожидающее чтение, но не
+    // трогает обработчик уже успешно завершившегося чтения, который может
+    // остаться в очереди io_context и отработать следом — без признака он
+    // дочитал бы следующий кадр (readHeader()/readBody() не проверяют его
+    // сами по себе, а закрытый сокет к тому моменту уже не спасёт от
+    // повторного захода). Признак в обеих ветках означает одно и то же:
+    // "идёт закрытие, читать больше нечего" — та же проверка
+    // (!closeAfterWrite_) на выходе из readBody(), что уже останавливает
+    // конвейер команд, останавливает и этот случай.
+    //
+    // Идемпотентен по построению: повторный вызов на сессии, уже
+    // закрывающейся (closeAfterWrite_ уже true) или уже закрытой (очередь
+    // пуста, сокет уже закрыт closeSocket()'ом), не делает ничего нового —
+    // closeSocket() на уже закрытом сокете и повторное взведение уже
+    // взведённого признака безвредны. Это существенно: повторный SIGTERM
+    // во время уже идущей остановки обходит реестр сессий снова (раздел
+    // 2.4 документа).
+    closeAfterWrite_ = true;
+    if (writeQueue_.empty()) {
+        closeSocket();
+    }
 }
 
 void Session::closeAfterMessageTooLarge(const std::string& message) {
