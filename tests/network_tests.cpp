@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <future>
@@ -17,10 +18,13 @@
 #include "command_processor.hpp"
 #include "config.hpp"
 #include "exceptions.hpp"
+#include "execution_result.hpp"
 #include "message_codec.hpp"
 #include "order.hpp"
+#include "order_repository.hpp"
 #include "pg_connection.hpp"
 #include "pg_result.hpp"
+#include "recovery_service.hpp"
 #include "request_router.hpp"
 #include "server.hpp"
 #include "test_database.hpp"
@@ -96,6 +100,60 @@ struct TestServer {
     std::thread ioThread;
 };
 
+// То же назначение, что и у TestServer выше — сервер и его io-поток,
+// поднятые в этом же процессе на порту 0, — но здесь CommandProcessor и
+// RequestRouter собираются снаружи и передаются готовыми: это нужно тесту
+// восстановления через перезапуск, где processor обязан пройти
+// recoverState() до того, как Server начнёт его обслуживать (REQ-NET-14),
+// а не быть свежесозданным изнутри обёртки, как в TestServer.
+//
+// Деструктор не сворачивает сервер штатно: server.stop() лишь ставит задачу
+// остановки через post(), а следующая же строка, ioContext.stop(), обычно
+// прерывает цикл событий раньше, чем эта задача успевает выполниться, —
+// поэтому полагаться здесь на аккуратное закрытие сессий изнутри io_context
+// нельзя. Освобождение происходит через деструкторы: acceptor закрывается
+// вместе с Server, а сессии — вместе с io_context, когда тот отбрасывает свои
+// незавершённые обработчики. Что деструктор действительно гарантирует — это
+// ioThread.join() при любом пути выхода из области видимости, включая
+// досрочный возврат из ASSERT_*: без него тест, упавший на промежуточной
+// проверке до явной остановки, уносил бы весь процесс в std::terminate()
+// из-за неприсоединённого std::thread вместо понятного красного результата.
+struct ManualServer {
+    ManualServer(RequestRouter& router, std::size_t maxMessageSize)
+        : config{"127.0.0.1", 0, maxMessageSize}, server(ioContext, config, router) {
+        server.start();
+        ioThread = std::thread([this] {
+            try {
+                ioContext.run();
+            } catch (const std::exception& e) {
+                ADD_FAILURE() << "io_context::run() threw: " << e.what();
+            }
+        });
+    }
+
+    ~ManualServer() {
+        server.stop();
+        ioContext.stop();
+        if (ioThread.joinable()) {
+            ioThread.join();
+        }
+    }
+
+    unsigned short port() const { return server.port(); }
+
+    // Порядок полей значим, как и в TestServer выше: server хранит ссылку на
+    // router и работает через ioContext, поэтому обязан разрушаться раньше
+    // ioContext (деструкторы полей вызываются в порядке, обратном объявлению
+    // — отсюда ioContext объявлен первым). router передаётся снаружи по
+    // ссылке и не хранится этой обёрткой — время его жизни обеспечивает
+    // вызывающий: router (а вместе с ним и CommandProcessor, на который он
+    // ссылается) обязан пережить ManualServer целиком.
+    boost::asio::io_context ioContext;
+    ServerConfig config;
+    Server server;
+    std::thread ioThread;
+};
+
 // Полностью очищает три таблицы персистентности — тот же порядок и то же
 // обоснование, что и в tests/integration_tests.cpp: trades ссылается на
 // orders внешним ключом, поэтому сначала сделки, потом заявки, затем
@@ -143,6 +201,46 @@ void runInIoContext(TestServer& testServer, const std::function<void()>& fn) {
 // выход по ASSERT_TRUE после watchdog оставил бы его неприсоединённым, и
 // вместо понятного красного теста упал бы весь тестовый бинарник на
 // std::terminate() из деструктора неприсоединённого std::thread.
+// REQ-TEST-11: несколько тестов ниже читают ответ сервера
+// напрямую через синхронный boost::asio::read на сыром сокете (им нужен
+// контроль над байтами, которого нет у Client) — а у такого чтения, в
+// отличие от Client (см. src/client.cpp, каждая операция которого ограничена
+// io_context::run_for(timeout)), по умолчанию нет предела по времени вообще.
+// При неответившем сервере (регрессия, из-за которой ответ не пришёл бы)
+// это было бы зависанием, а не падением, — то, что явно запрещено ТЗ. Работа
+// выполняется во вспомогательном потоке; исключение из неё пробрасывается в
+// поток теста через future.get(), чтобы обычная сетевая ошибка (например,
+// обрыв соединения) осталась падением через тот же путь, что и раньше, а не
+// стала std::terminate() в чужом потоке. При исчерпании таймаута тест
+// фиксирует падение и завершает процесс принудительно — тем же приёмом, что
+// и остальные ограничения по времени в этом файле (gtest_discover_tests
+// запускает каждый тест отдельным процессом, поэтому аварийный выход уносит
+// только его).
+void readExactWithDeadline(boost::asio::ip::tcp::socket& socket,
+    boost::asio::mutable_buffer buffer, std::chrono::seconds timeout) {
+    std::promise<void> done;
+    std::future<void> doneFuture = done.get_future();
+    std::thread reader([&socket, buffer, &done] {
+        try {
+            boost::asio::read(socket, buffer);
+            done.set_value();
+        } catch (...) {
+            done.set_exception(std::current_exception());
+        }
+    });
+
+    if (doneFuture.wait_for(timeout) != std::future_status::ready) {
+        ADD_FAILURE() << "сервер не ответил за отведённое время";
+        // std::_Exit не сбрасывает буферы stdio; под ctest stdout полностью
+        // буферизован, и без явного fflush() оператор получил бы код 1 и
+        // пустой вывод — ни имени теста, ни сообщения ADD_FAILURE выше.
+        std::fflush(nullptr);
+        std::_Exit(1);
+    }
+    reader.join();
+    doneFuture.get();
+}
+
 void joinIoThreadWithTimeout(TestServer& testServer, std::chrono::seconds timeout) {
     ASSERT_TRUE(testServer.ioThread.joinable());
 
@@ -792,8 +890,16 @@ TEST(NetworkTest, PrintShowsRemainingQuantityNotInitial) {
 }
 
 // Критерий 9: одна команда с одним command_id отправлена дважды — второй
-// ответ совпадает с первым целиком (включая trades), а число сделок в БД
-// не выросло (REQ-API-09, "ловушка идемпотентного ответа").
+// ответ совпадает с первым целиком (включая trades), число сделок в БД
+// не выросло (REQ-API-09, "ловушка идемпотентного ответа"), и — отдельно —
+// повторная отправка не трогает книгу заявок ещё раз. Снимок PRINT снят до
+// повтора и после: реализация, которая на повторе честно проводит команду
+// через движок заново (а не просто отдаёт закешированный ответ), дала бы
+// на второй PRINT другую книгу (сделка исполнилась бы дважды, BUY 1 остался
+// бы без остатка), поэтому сравнения одних лишь ответов ADD недостаточно.
+// Ожидаемое содержимое снимка (а не просто равенство "снимок1 == снимок2")
+// нужно, чтобы не пропустить реализацию, у которой оба снимка совпадающе
+// пусты или совпадающе неверны.
 TEST(NetworkTest, IdempotentAddOverSocketReturnsSameResponseAndDoesNotDuplicateTrade) {
     auto connOpt = tryConnect();
     if (!connOpt) {
@@ -803,6 +909,8 @@ TEST(NetworkTest, IdempotentAddOverSocketReturnsSameResponseAndDoesNotDuplicateT
 
     nlohmann::json first;
     nlohmann::json second;
+    nlohmann::json bookBeforeRepeat;
+    nlohmann::json bookAfterRepeat;
     {
         // Область видимости обязана закончиться (и присоединить io-поток
         // сервера) раньше, чем тест снова тронет *connOpt напрямую: та же
@@ -834,9 +942,25 @@ TEST(NetworkTest, IdempotentAddOverSocketReturnsSameResponseAndDoesNotDuplicateT
         ASSERT_EQ(first.at("status"), "OK");
         ASSERT_EQ(first.at("trades").size(), 1u);
 
+        const nlohmann::json printRequest = nlohmann::json::parse(R"({"type":"PRINT"})");
+        bookBeforeRepeat = client.request(printRequest);
+        ASSERT_EQ(bookBeforeRepeat.at("status"), "OK");
+
         second = client.request(sell);
+
+        bookAfterRepeat = client.request(printRequest);
+        ASSERT_EQ(bookAfterRepeat.at("status"), "OK");
     }
     EXPECT_EQ(second, first);
+    EXPECT_EQ(bookAfterRepeat, bookBeforeRepeat);
+
+    // Содержимое снимка: BUY 1 с остатком 6 (10 - 4 из единственной сделки),
+    // SELL пуста — заявка 2 исполнилась целиком и с книги не осталась.
+    const auto& buyBefore = bookBeforeRepeat.at("result").at("buy");
+    ASSERT_EQ(buyBefore.size(), 1u);
+    EXPECT_EQ(buyBefore[0].at("order_id"), 1);
+    EXPECT_EQ(buyBefore[0].at("quantity"), 6);
+    EXPECT_TRUE(bookBeforeRepeat.at("result").at("sell").empty());
 
     PgResult tradeCount = connOpt->execute(
         "SELECT COUNT(*) FROM trades WHERE buy_order_id = $1 AND sell_order_id = $2",
@@ -1045,6 +1169,18 @@ TEST(NetworkTest, PersistenceFailureSendsResponseThenClosesThenSetsFatalFlag) {
     // видя ioThread уже неприсоединяемым, не станет join()'ить второй раз.
     joinIoThreadWithTimeout(testServer, std::chrono::seconds(5));
     EXPECT_TRUE(testServer.server.hadFatalError());
+
+    // REQ-COMPAT-05 через сетевой путь: движок в памяти честно сопоставил
+    // ADD (книга изменилась), но вся транзакция сохранения (заявка, сделки,
+    // processed_commands) обязана откатиться целиком из-за конфликта на
+    // последнем шаге (INSERT processed_commands с уже занятым command_id,
+    // PersistenceService::save, docs/task4/02-network-protocol.md, раздел
+    // 3.5) — заявка не должна просочиться в БД частично, отдельно от
+    // остального эффекта команды.
+    PgResult orderRow = connOpt->execute(
+        "SELECT COUNT(*) FROM orders WHERE order_id = $1", {std::optional<std::string>("501")});
+    ASSERT_EQ(orderRow.rowCount(), 1);
+    EXPECT_EQ(orderRow.getValue(0, 0), "0");
 }
 
 // Признак фатальной ошибки обязан остаться взведённым, даже если клиент
@@ -1109,10 +1245,10 @@ TEST(NetworkTest, PersistenceFailureKeepsFatalFlagWhenClientDisconnectsWithoutRe
 
         boost::asio::write(rawSocket, boost::asio::buffer(pingFrame));
         std::array<char, kFrameHeaderSize> pongHeader{};
-        boost::asio::read(rawSocket, boost::asio::buffer(pongHeader));
+        readExactWithDeadline(rawSocket, boost::asio::buffer(pongHeader), std::chrono::seconds(5));
         const std::uint32_t pongBodySize = codec.decodeHeader(pongHeader);
         std::string pongBody(pongBodySize, '\0');
-        boost::asio::read(rawSocket, boost::asio::buffer(pongBody));
+        readExactWithDeadline(rawSocket, boost::asio::buffer(pongBody), std::chrono::seconds(5));
 
         boost::asio::write(rawSocket, boost::asio::buffer(addFrame));
         rawSocket.set_option(boost::asio::socket_base::linger(true, 0));
@@ -1273,6 +1409,7 @@ TEST(NetworkTest, StopDrainsHangingSessionWithoutDeadlock) {
         // это и есть зависание, от которого тест обязан отличаться падением
         // (раздел 7.2, пункт 5 документа), а не попыткой join() заблокиро-
         // ванного потока.
+        std::fflush(nullptr);
         std::_Exit(1);
     }
     joiner.join();
@@ -1328,7 +1465,7 @@ TEST(NetworkTest, StopForcesShutdownAfterDeadlineWhenWriteNeverDrains) {
     boost::asio::write(clientSocket, boost::asio::buffer(codec.encode(R"({"type":"PRINT"})")));
 
     std::array<char, kFrameHeaderSize> header{};
-    boost::asio::read(clientSocket, boost::asio::buffer(header));
+    readExactWithDeadline(clientSocket, boost::asio::buffer(header), std::chrono::seconds(5));
 
     // Дальше клиент намеренно не читает ничего — сессия остаётся с
     // недописанным ответом до самого конца теста.
@@ -1345,6 +1482,7 @@ TEST(NetworkTest, StopForcesShutdownAfterDeadlineWhenWriteNeverDrains) {
     if (stoppedFuture.wait_for(kWait) != std::future_status::ready) {
         ADD_FAILURE() << "io_context::run() не вернулась даже принудительно"
                           " по истечении shutdownTimeout";
+        std::fflush(nullptr);
         std::_Exit(1);
     }
     joiner.join();
@@ -1384,7 +1522,7 @@ TEST(NetworkTest, StopSendsQueuedResponseBeforeClosingSocket) {
     boost::asio::write(rawSocket, boost::asio::buffer(codec.encode(R"({"type":"PRINT"})")));
 
     std::array<char, kFrameHeaderSize> header{};
-    boost::asio::read(rawSocket, boost::asio::buffer(header));
+    readExactWithDeadline(rawSocket, boost::asio::buffer(header), std::chrono::seconds(5));
     const std::uint32_t bodySize = codec.decodeHeader(header);
 
     // Очередь записи этой сессии на этот момент заведомо не пуста: доставлены
@@ -1424,6 +1562,7 @@ TEST(NetworkTest, StopSendsQueuedResponseBeforeClosingSocket) {
     if (doneFuture.wait_for(kTimeout) != std::future_status::ready) {
         ADD_FAILURE() << "сервер не прислал накопленный ответ и не закрыл сокет"
                           " за отведённое время";
+        std::fflush(nullptr);
         std::_Exit(1);
     }
     reader.join();
@@ -1472,7 +1611,7 @@ TEST(NetworkTest, SessionDoesNotServePipelinedCommandsSentAfterStopBegins) {
     boost::asio::write(clientSocket, boost::asio::buffer(codec.encode(R"({"type":"PRINT"})")));
 
     std::array<char, kFrameHeaderSize> header{};
-    boost::asio::read(clientSocket, boost::asio::buffer(header));
+    readExactWithDeadline(clientSocket, boost::asio::buffer(header), std::chrono::seconds(5));
 
     // Очередь записи этой сессии заведомо не пуста (доставлены только
     // четыре байта заголовка из нескольких мегабайт тела, а клиент дальше
@@ -1499,6 +1638,7 @@ TEST(NetworkTest, SessionDoesNotServePipelinedCommandsSentAfterStopBegins) {
         constexpr std::chrono::seconds kStopTimeout(5);
         if (stopProcessedFuture.wait_for(kStopTimeout) != std::future_status::ready) {
             ADD_FAILURE() << "остановка сервера не была обработана io_context за отведённое время";
+            std::fflush(nullptr);
             std::_Exit(1);
         }
     }
@@ -1545,6 +1685,7 @@ TEST(NetworkTest, SessionDoesNotServePipelinedCommandsSentAfterStopBegins) {
     if (receivedFuture.wait_for(kTimeout) != std::future_status::ready) {
         ADD_FAILURE() << "сокет не закрылся после конвейера команд, отправленного"
                           " после начала остановки";
+        std::fflush(nullptr);
         std::_Exit(1);
     }
     reader.join();
@@ -1557,6 +1698,7 @@ TEST(NetworkTest, SessionDoesNotServePipelinedCommandsSentAfterStopBegins) {
     });
     if (stoppedFuture.wait_for(kTimeout) != std::future_status::ready) {
         ADD_FAILURE() << "io_context::run() не вернулась за отведённое время";
+        std::fflush(nullptr);
         std::_Exit(1);
     }
     joiner.join();
@@ -1606,47 +1748,56 @@ TEST(NetworkTest, ResponseTooLargeOnCompletedAddSaysCommandWasSaved) {
     cleanupAllTables(*connOpt);
 
     constexpr std::size_t kServerLimit = 4096;
-    TestServer testServer(kServerLimit, &*connOpt);
-
-    // sequenceNumber восстановленных заявок взят заведомо больше любого,
-    // который SequenceGenerator (singleton, в этом тестовом процессе ещё ни
-    // разу не вызывался) выдаст самой новой заявке ниже: restoreOrder кладёт
-    // заявки в книгу мимо генератора и мимо БД, а sequence_number в таблице
-    // orders уникален — коллизия с первым же вызовом генератора (обычно 1)
-    // иначе оборвала бы сохранение уникальным нарушением ключа.
     constexpr int kSellOrderCount = 200;
-    constexpr long long kRestoredSequenceBase = 1000000;
-    runInIoContext(testServer, [&testServer] {
-        for (int i = 0; i < kSellOrderCount; ++i) {
-            testServer.processor.restoreOrder(std::make_shared<Order>(
-                i + 1, Side::Sell, 100, 1, 1, kRestoredSequenceBase + i, OrderStatus::Open));
-        }
-    });
 
-    Client client(kServerLimit * 20);
-    client.connect("127.0.0.1", testServer.port());
+    {
+        // Область видимости обязана закончиться (и присоединить io-поток
+        // сервера) раньше прямого запроса к *connOpt ниже — то же
+        // обязательство, что и в тесте сохранения ADD в базу
+        // (AddOverSocketPersistsOrdersAndTradesToDatabase): libpq не
+        // допускает работу с одним соединением из двух потоков одновременно.
+        TestServer testServer(kServerLimit, &*connOpt);
 
-    nlohmann::json add;
-    add["type"] = "ADD";
-    add["order_id"] = 100001;
-    add["side"] = "BUY";
-    add["price"] = 100;
-    add["quantity"] = kSellOrderCount;
-    add["command_id"] = "cmd-response-too-large";
+        // sequenceNumber восстановленных заявок взят заведомо больше любого,
+        // который SequenceGenerator (singleton, в этом тестовом процессе ещё
+        // ни разу не вызывался) выдаст самой новой заявке ниже: restoreOrder
+        // кладёт заявки в книгу мимо генератора и мимо БД, а sequence_number
+        // в таблице orders уникален — коллизия с первым же вызовом
+        // генератора (обычно 1) иначе оборвала бы сохранение уникальным
+        // нарушением ключа.
+        constexpr long long kRestoredSequenceBase = 1000000;
+        runInIoContext(testServer, [&testServer] {
+            for (int i = 0; i < kSellOrderCount; ++i) {
+                testServer.processor.restoreOrder(std::make_shared<Order>(
+                    i + 1, Side::Sell, 100, 1, 1, kRestoredSequenceBase + i, OrderStatus::Open));
+            }
+        });
 
-    const nlohmann::json response = client.request(add);
-    EXPECT_EQ(response.at("status"), "ERROR");
-    EXPECT_EQ(response.at("error"), "RESPONSE_TOO_LARGE");
-    ASSERT_TRUE(response.at("message").is_string());
-    const std::string message = response.at("message").get<std::string>();
-    // Формулировка обязана исключать ложный вывод "заявка не принята":
-    // должно быть явно сказано, что команда выполнена и сохранена.
-    EXPECT_NE(message.find("executed"), std::string::npos) << message;
-    EXPECT_NE(message.find("saved"), std::string::npos) << message;
+        Client client(kServerLimit * 20);
+        client.connect("127.0.0.1", testServer.port());
 
-    // Соединение осталось живым — ошибка пользователя его не разрывает.
-    const nlohmann::json pong = client.request(nlohmann::json::parse(R"({"type":"PING"})"));
-    EXPECT_EQ(pong.at("status"), "OK");
+        nlohmann::json add;
+        add["type"] = "ADD";
+        add["order_id"] = 100001;
+        add["side"] = "BUY";
+        add["price"] = 100;
+        add["quantity"] = kSellOrderCount;
+        add["command_id"] = "cmd-response-too-large";
+
+        const nlohmann::json response = client.request(add);
+        EXPECT_EQ(response.at("status"), "ERROR");
+        EXPECT_EQ(response.at("error"), "RESPONSE_TOO_LARGE");
+        ASSERT_TRUE(response.at("message").is_string());
+        const std::string message = response.at("message").get<std::string>();
+        // Формулировка обязана исключать ложный вывод "заявка не принята":
+        // должно быть явно сказано, что команда выполнена и сохранена.
+        EXPECT_NE(message.find("executed"), std::string::npos) << message;
+        EXPECT_NE(message.find("saved"), std::string::npos) << message;
+
+        // Соединение осталось живым — ошибка пользователя его не разрывает.
+        const nlohmann::json pong = client.request(nlohmann::json::parse(R"({"type":"PING"})"));
+        EXPECT_EQ(pong.at("status"), "OK");
+    }
 
     // Команда действительно выполнена и сохранена, как и утверждает
     // сообщение: сделки в БД есть, несмотря на то что клиент их не увидел.
@@ -1654,4 +1805,401 @@ TEST(NetworkTest, ResponseTooLargeOnCompletedAddSaysCommandWasSaved) {
         "SELECT COUNT(*) FROM trades WHERE buy_order_id = $1", {std::optional<std::string>("100001")});
     ASSERT_EQ(tradeCount.rowCount(), 1);
     EXPECT_EQ(tradeCount.getValue(0, 0), std::to_string(kSellOrderCount));
+}
+
+// REQ-COMPAT-01: сохранение заявок, сделок и обработанных команд в
+// PostgreSQL продолжает работать через сетевой путь. Проверяется прямым
+// чтением таблиц orders, trades и processed_commands, а не только ответом
+// клиенту — ответ мог бы быть верным и при отсутствии записи в базу
+// (сериализация ответа и запись в БД — независимые шаги,
+// docs/task4/02-network-protocol.md, раздел 3.7). processed_commands
+// проверяется отдельно и по обоим command_id: это путь идемпотентности, а
+// не побочный эффект записи orders/trades, и наличие результата (result не
+// пуст) важно так же, как факт наличия самой строки — пустой result сделал
+// бы повтор команды неотличимым от первого выполнения.
+TEST(NetworkTest, AddOverSocketPersistsOrdersAndTradesToDatabase) {
+    auto connOpt = tryConnect();
+    if (!connOpt) {
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    cleanupAllTables(*connOpt);
+
+    {
+        // Область видимости обязана закончиться (и присоединить io-поток
+        // сервера) раньше прямых запросов к *connOpt ниже — то же
+        // обязательство, что и в тесте идемпотентности выше: libpq не
+        // допускает работу с одним соединением из двух потоков одновременно.
+        TestServer testServer(4096, &*connOpt);
+        Client client(4096);
+        client.connect("127.0.0.1", testServer.port());
+
+        nlohmann::json buy;
+        buy["type"] = "ADD";
+        buy["order_id"] = 701;
+        buy["side"] = "BUY";
+        buy["price"] = 100;
+        buy["quantity"] = 10;
+        buy["command_id"] = "cmd-persist-buy";
+        ASSERT_EQ(client.request(buy).at("status"), "OK");
+
+        nlohmann::json sell;
+        sell["type"] = "ADD";
+        sell["order_id"] = 702;
+        sell["side"] = "SELL";
+        sell["price"] = 100;
+        sell["quantity"] = 4;
+        sell["command_id"] = "cmd-persist-sell";
+        ASSERT_EQ(client.request(sell).at("status"), "OK");
+    }
+
+    // Книжная заявка (701) обязана быть в базе с остатком после частичного
+    // исполнения (10 - 4 = 6), а не с исходным объёмом и не отсутствовать
+    // вовсе.
+    PgResult buyOrder = connOpt->execute(
+        "SELECT side, price, initial_quantity, remaining_quantity, status FROM orders "
+        "WHERE order_id = $1",
+        {std::optional<std::string>("701")});
+    ASSERT_EQ(buyOrder.rowCount(), 1);
+    EXPECT_EQ(buyOrder.getValue(0, 0), "BUY");
+    EXPECT_EQ(buyOrder.getValue(0, 1), "100");
+    EXPECT_EQ(buyOrder.getValue(0, 2), "10");
+    EXPECT_EQ(buyOrder.getValue(0, 3), "6");
+    EXPECT_EQ(buyOrder.getValue(0, 4), "PARTIALLY_FILLED");
+
+    PgResult sellOrder = connOpt->execute(
+        "SELECT status, remaining_quantity FROM orders WHERE order_id = $1",
+        {std::optional<std::string>("702")});
+    ASSERT_EQ(sellOrder.rowCount(), 1);
+    EXPECT_EQ(sellOrder.getValue(0, 0), "FILLED");
+    EXPECT_EQ(sellOrder.getValue(0, 1), "0");
+
+    PgResult trade = connOpt->execute(
+        "SELECT price, quantity FROM trades WHERE buy_order_id = $1 AND sell_order_id = $2",
+        {std::optional<std::string>("701"), std::optional<std::string>("702")});
+    ASSERT_EQ(trade.rowCount(), 1);
+    EXPECT_EQ(trade.getValue(0, 0), "100");
+    EXPECT_EQ(trade.getValue(0, 1), "4");
+
+    // Обе команды обязаны осесть в processed_commands (REQ-COMPAT-01 требует
+    // сохранение именно "обработанных команд", это отдельная таблица от
+    // orders/trades и отдельный путь записи — идемпотентность). Строка
+    // должна не просто существовать, но и нести непустой result: там лежит
+    // сериализованный ExecutionResult, без которого повтор command_id не
+    // смог бы вернуть тот же ответ клиенту.
+    // Проверяется не только непустота: строка "{}" непуста, но эффекта
+    // команды не несёт, и повтор command_id по такой записи вернул бы
+    // клиенту пустой ответ вместо исходного. Поэтому result разбирается и
+    // сверяется по существу — сделка у SELL-команды и снимок заявки у BUY.
+    PgResult buyCommand = connOpt->execute(
+        "SELECT result FROM processed_commands WHERE command_id = $1",
+        {std::optional<std::string>("cmd-persist-buy")});
+    ASSERT_EQ(buyCommand.rowCount(), 1);
+    ASSERT_FALSE(buyCommand.isNull(0, 0));
+    const nlohmann::json buyStored = nlohmann::json::parse(buyCommand.getValue(0, 0));
+    // BUY встала в книгу, ни с чем не скрестившись: сделок нет, но снимок
+    // самой заявки в эффекте команды быть обязан.
+    EXPECT_TRUE(buyStored.at("trades").empty());
+    EXPECT_FALSE(buyStored.at("order_changes").empty());
+
+    PgResult sellCommand = connOpt->execute(
+        "SELECT result FROM processed_commands WHERE command_id = $1",
+        {std::optional<std::string>("cmd-persist-sell")});
+    ASSERT_EQ(sellCommand.rowCount(), 1);
+    ASSERT_FALSE(sellCommand.isNull(0, 0));
+    const nlohmann::json sellStored = nlohmann::json::parse(sellCommand.getValue(0, 0));
+    ASSERT_EQ(sellStored.at("trades").size(), 1u);
+    EXPECT_EQ(sellStored.at("trades")[0].at("price"), 100);
+    EXPECT_EQ(sellStored.at("trades")[0].at("quantity"), 4);
+}
+
+// REQ-COMPAT-04: цену сделки задаёт заявка, уже
+// стоявшая в книге (matching_engine.cpp, executeTrade: bookOrder->getPrice()),
+// а не входящая. BUY и SELL заведены по разным ценам специально: при ошибке
+// "цена входящей заявки" сделка получила бы цену 95 вместо 100 — отличие
+// видно и в ответе клиенту, и в записи БД, тест проверяет оба места.
+TEST(NetworkTest, TradePriceComesFromRestingBookOrderNotIncomingOrder) {
+    auto connOpt = tryConnect();
+    if (!connOpt) {
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    cleanupAllTables(*connOpt);
+
+    {
+        // Область видимости обязана закончиться (и присоединить io-поток
+        // сервера) раньше прямого запроса к *connOpt ниже — то же
+        // обязательство, что и в тесте сохранения ADD в базу
+        // (AddOverSocketPersistsOrdersAndTradesToDatabase): libpq не
+        // допускает работу с одним соединением из двух потоков одновременно.
+        TestServer testServer(4096, &*connOpt);
+        Client client(4096);
+        client.connect("127.0.0.1", testServer.port());
+
+        nlohmann::json buy;
+        buy["type"] = "ADD";
+        buy["order_id"] = 801;
+        buy["side"] = "BUY";
+        buy["price"] = 100;
+        buy["quantity"] = 5;
+        buy["command_id"] = "cmd-price-buy";
+        ASSERT_EQ(client.request(buy).at("status"), "OK");
+
+        // Цена входящей SELL (95) заведомо ниже книжной BUY (100) — заявки
+        // всё равно скрещиваются (95 <= 100), но верная цена сделки — цена
+        // заявки из книги (100), а не входящей (95).
+        nlohmann::json sell;
+        sell["type"] = "ADD";
+        sell["order_id"] = 802;
+        sell["side"] = "SELL";
+        sell["price"] = 95;
+        sell["quantity"] = 5;
+        sell["command_id"] = "cmd-price-sell";
+        const nlohmann::json response = client.request(sell);
+
+        ASSERT_EQ(response.at("status"), "OK");
+        ASSERT_EQ(response.at("trades").size(), 1u);
+        EXPECT_EQ(response.at("trades")[0].at("price"), 100);
+    }
+
+    PgResult trade = connOpt->execute(
+        "SELECT price FROM trades WHERE buy_order_id = $1 AND sell_order_id = $2",
+        {std::optional<std::string>("801"), std::optional<std::string>("802")});
+    ASSERT_EQ(trade.rowCount(), 1);
+    EXPECT_EQ(trade.getValue(0, 0), "100");
+}
+
+// REQ-TEST-06: восстановление состояния через перезапуск сервера. Старый
+// экземпляр сервера разрушается целиком, новый создаётся заново на том же
+// соединении с базой, а книгу запрашивает новый клиент; среди
+// восстановленных заявок есть частично исполненная (проверяется остаток, а
+// не исходный объём), и проверяется порядок заявок внутри одного ценового
+// уровня, а не только их состав.
+//
+// Тест намеренно прогоняется на "грязной" базе — до того, как первый
+// экземпляр сервера вообще стартует, в таблицу orders напрямую (в обход
+// обычного командного пути) кладётся посторонняя активная заявка, как будто
+// оставленная другим, уже завершившимся процессом. Восстановление читает всю
+// таблицу активных заявок целиком, а не только те, что добавил сам тест, —
+// эта заявка обязана оказаться в снимке книги после перезапуска наравне с
+// остальными.
+TEST(NetworkTest, RestartRecoversPartialFillAndPriorityOrderOnDirtyDatabase) {
+    auto connOpt = tryConnect();
+    if (!connOpt) {
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    cleanupAllTables(*connOpt);
+
+    // Посторонняя заявка: цена (999) вне диапазона остальных цен теста —
+    // чтобы не участвовать в сопоставлении и не сместить остальные проверки,
+    // но остаться на дальнем конце sell-стороны книги.
+    {
+        OrderChange strayOrder;
+        strayOrder.id = 900001;
+        strayOrder.side = Side::Sell;
+        strayOrder.price = 999;
+        strayOrder.initialQuantity = 2;
+        strayOrder.remainingQuantity = 2;
+        strayOrder.status = OrderStatus::Open;
+        strayOrder.sequenceNumber = 1;
+        OrderRepository().save(*connOpt, strayOrder);
+    }
+
+    {
+        // Первый экземпляр сервера восстанавливает книгу при старте, как и
+        // предписывает REQ-NET-14, — тем же recoverState(), которым
+        // пользуется server_main.cpp, поэтому посторонняя заявка сразу видна
+        // в его книге, а не только после второго перезапуска.
+        //
+        // ManualServer (а не голые Server/io_context/std::thread) гарантирует
+        // Server::stop() и join() даже при досрочном возврате из ASSERT_*
+        // ниже — без этой гарантии упавшая на середине проверка уносила бы
+        // процесс в std::terminate() из-за неприсоединённого потока, а не
+        // давала понятный красный тест.
+        CommandProcessor processor1;
+        recoverState(*connOpt, processor1);
+
+        RequestRouter router1(processor1, &*connOpt);
+        ManualServer serverWrap1(router1, 4096);
+
+        Client client(4096);
+        client.connect("127.0.0.1", serverWrap1.port());
+
+        // order_id 2 и order_id 1 делят один ценовой уровень (100). order_id
+        // намеренно не совпадает с порядком поступления: первой приходит
+        // заявка с БОЛЬШИМ идентификатором (2), второй — с меньшим (1).
+        // Реализация, потерявшая приоритет по времени и вместо него
+        // сортирующая книгу по возрастанию order_id, вернула бы обратный
+        // порядок (1, затем 2) — старая расстановка идентификаторов (1
+        // раньше 2) этого бы не поймала, потому что совпадала с сортировкой
+        // по возрастанию id случайно.
+        nlohmann::json buy1;
+        buy1["type"] = "ADD";
+        buy1["order_id"] = 2;
+        buy1["side"] = "BUY";
+        buy1["price"] = 100;
+        buy1["quantity"] = 10;
+        buy1["command_id"] = "cmd-restart-buy1";
+        ASSERT_EQ(client.request(buy1).at("status"), "OK");
+
+        nlohmann::json buy2;
+        buy2["type"] = "ADD";
+        buy2["order_id"] = 1;
+        buy2["side"] = "BUY";
+        buy2["price"] = 100;
+        buy2["quantity"] = 5;
+        buy2["command_id"] = "cmd-restart-buy2";
+        ASSERT_EQ(client.request(buy2).at("status"), "OK");
+
+        // Частично исполняет order_id 2 (раннюю по времени заявку на уровне
+        // 100): 10 -> 6; order_id 1 не затронут.
+        nlohmann::json sell3;
+        sell3["type"] = "ADD";
+        sell3["order_id"] = 3;
+        sell3["side"] = "SELL";
+        sell3["price"] = 100;
+        sell3["quantity"] = 4;
+        sell3["command_id"] = "cmd-restart-sell3";
+        const nlohmann::json tradeResponse = client.request(sell3);
+        ASSERT_EQ(tradeResponse.at("status"), "OK");
+        ASSERT_EQ(tradeResponse.at("trades").size(), 1u);
+        EXPECT_EQ(tradeResponse.at("trades")[0].at("buy_order_id"), 2);
+
+        // Остаётся в книге непересекающейся ценой (105 < 999 посторонней
+        // заявки, но выше лучшей BUY 100 — не матчится ни с чем).
+        nlohmann::json sell4;
+        sell4["type"] = "ADD";
+        sell4["order_id"] = 4;
+        sell4["side"] = "SELL";
+        sell4["price"] = 105;
+        sell4["quantity"] = 7;
+        sell4["command_id"] = "cmd-restart-sell4";
+        ASSERT_EQ(client.request(sell4).at("status"), "OK");
+
+        // Клиент дождался ответа на все команды до того, как инициируется
+        // остановка блока (деструктор serverWrap1 ниже), — тест намеренно не
+        // заходит в узкое окно "кадр принят ровно в момент сигнала"
+        // (docs/task4/01-service-lifecycle.md, раздел 4.2): это отдельное,
+        // осознанно не устраняемое поведение системы, а не то, что здесь
+        // проверяется.
+    }
+    // Первый экземпляр сервера разрушен целиком (деструктор ManualServer
+    // остановил Server и присоединил io-поток) — Server, CommandProcessor и
+    // RequestRouter вышли из области видимости. Но не всё общее исчезает
+    // вместе с ними: SequenceGenerator::instance() и Logger::instance() —
+    // процессные синглтоны, и второй экземпляр пользуется теми же
+    // объектами, что и первый, а не независимой копией.
+    //
+    // Отсюда ограничение этого теста: из-за общего SequenceGenerator он не
+    // способен заметить пропажу восстановления счётчика последовательности
+    // при старте — к моменту создания processor2 счётчик в этом процессе и
+    // так уже стоит в нужном значении, независимо от того, читает ли
+    // recoverState() что-либо о последнем sequence_number из БД. При
+    // настоящем перезапуске процесса (systemctl restart, REQ-COMPAT-03)
+    // этой поблажки нет — там SequenceGenerator стартует заново, и такую
+    // регрессию способен поймать только перезапуск процесса целиком, что
+    // проверяется отдельно (задача 15).
+
+    CommandProcessor processor2;
+    recoverState(*connOpt, processor2);
+
+    RequestRouter router2(processor2, &*connOpt);
+    ManualServer serverWrap2(router2, 4096);
+
+    // Новый клиент — отдельное соединение, никак не связанное с тем, что
+    // добавляло заявки до остановки.
+    Client newClient(4096);
+    newClient.connect("127.0.0.1", serverWrap2.port());
+    const nlohmann::json response =
+        newClient.request(nlohmann::json::parse(R"({"type":"PRINT"})"));
+    ASSERT_EQ(response.at("status"), "OK");
+
+    const auto& buy = response.at("result").at("buy");
+    const auto& sell = response.at("result").at("sell");
+
+    // Остаток частично исполненной заявки, а не исходный объём (6, не 10),
+    // и порядок внутри ценового уровня: order_id 2 раньше order_id 1 — FIFO
+    // по времени поступления, сохранённый через sequence_number и явную
+    // сортировку при восстановлении (ORDER BY sequence_number ASC,
+    // order_repository.cpp). Цена проверяется по обеим сторонам книги —
+    // раздел 3.4 контракта фиксирует в записи снимка три поля (order_id,
+    // price, quantity), а не два.
+    ASSERT_EQ(buy.size(), 2u);
+    EXPECT_EQ(buy[0].at("order_id"), 2);
+    EXPECT_EQ(buy[0].at("price"), 100);
+    EXPECT_EQ(buy[0].at("quantity"), 6);
+    EXPECT_EQ(buy[1].at("order_id"), 1);
+    EXPECT_EQ(buy[1].at("price"), 100);
+    EXPECT_EQ(buy[1].at("quantity"), 5);
+
+    // sell: order_id 4 (цена 105) раньше посторонней заявки (цена 999) —
+    // возрастание цены. Посторонняя заявка тоже восстановлена, а не только
+    // заявки, добавленные этим тестом (тест прогоняется на грязной базе).
+    ASSERT_EQ(sell.size(), 2u);
+    EXPECT_EQ(sell[0].at("order_id"), 4);
+    EXPECT_EQ(sell[0].at("price"), 105);
+    EXPECT_EQ(sell[0].at("quantity"), 7);
+    EXPECT_EQ(sell[1].at("order_id"), 900001);
+    EXPECT_EQ(sell[1].at("price"), 999);
+    EXPECT_EQ(sell[1].at("quantity"), 2);
+}
+
+// REQ-COMPAT-04, третье доменное правило: рыночная заявка не попадает в
+// книгу. ModifyAndMarketOrderWorkOverNetwork (выше) исполняет MARKET SELL
+// целиком и книгу после этого не проверяет, поэтому реализация, кладущая
+// неисполненный остаток MARKET-заявки в книгу как обычный лимитный ордер,
+// прошла бы тот тест незамеченной. Здесь ликвидности в книге заведомо
+// меньше, чем в MARKET-заявке (BUY на 5, MARKET SELL на 8): сделка
+// исполняется на доступные 5, а непокрытый остаток (3) обязан быть просто
+// потерян — PRINT после этого обязан показать пустую книгу с обеих сторон,
+// а не BUY-остаток нулевой (уже исполнен целиком выше по цепочке) и не
+// SELL-остаток из недостающих 3 единиц MARKET-заявки.
+TEST(NetworkTest, MarketOrderWithInsufficientLiquidityIsNotAddedToBook) {
+    auto connOpt = tryConnect();
+    if (!connOpt) {
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    cleanupAllTables(*connOpt);
+
+    TestServer testServer(4096, &*connOpt);
+    Client client(4096);
+    client.connect("127.0.0.1", testServer.port());
+
+    nlohmann::json buy;
+    buy["type"] = "ADD";
+    buy["order_id"] = 20;
+    buy["side"] = "BUY";
+    buy["price"] = 100;
+    buy["quantity"] = 5;
+    buy["command_id"] = "cmd-liquidity-buy";
+    ASSERT_EQ(client.request(buy).at("status"), "OK");
+
+    // Снимок до рыночной заявки. Без него пустая книга в конце теста была бы
+    // единственным наблюдением, и реализация, у которой PRINT всегда
+    // возвращает пусто, прошла бы проверку насквозь.
+    const nlohmann::json printRequest = nlohmann::json::parse(R"({"type":"PRINT"})");
+    const nlohmann::json bookBefore = client.request(printRequest);
+    ASSERT_EQ(bookBefore.at("status"), "OK");
+    ASSERT_EQ(bookBefore.at("result").at("buy").size(), 1u);
+    EXPECT_EQ(bookBefore.at("result").at("buy")[0].at("order_id"), 20);
+    EXPECT_EQ(bookBefore.at("result").at("buy")[0].at("quantity"), 5);
+
+    nlohmann::json marketSell;
+    marketSell["type"] = "ADD";
+    marketSell["order_type"] = "MARKET";
+    marketSell["order_id"] = 21;
+    marketSell["side"] = "SELL";
+    marketSell["quantity"] = 8;
+    marketSell["command_id"] = "cmd-liquidity-market-sell";
+    const nlohmann::json marketResponse = client.request(marketSell);
+
+    EXPECT_EQ(marketResponse.at("status"), "OK");
+    ASSERT_EQ(marketResponse.at("trades").size(), 1u);
+    EXPECT_EQ(marketResponse.at("trades")[0].at("buy_order_id"), 20);
+    EXPECT_EQ(marketResponse.at("trades")[0].at("sell_order_id"), 21);
+    EXPECT_EQ(marketResponse.at("trades")[0].at("price"), 100);
+    EXPECT_EQ(marketResponse.at("trades")[0].at("quantity"), 5);
+
+    const nlohmann::json printResponse = client.request(printRequest);
+    ASSERT_EQ(printResponse.at("status"), "OK");
+    EXPECT_TRUE(printResponse.at("result").at("buy").empty());
+    EXPECT_TRUE(printResponse.at("result").at("sell").empty());
 }

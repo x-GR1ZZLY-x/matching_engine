@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <csignal>
+#include <cstdio>
 #include <cstdlib>
 #include <chrono>
 #include <future>
@@ -101,6 +102,7 @@ TEST(SignalHandlerTest, RealSigtermInvokesHandlerFromSignalThread) {
         // это и есть зависание, от которого тест обязан отличаться падением,
         // а не попыткой присоединить заблокированный поток (docs/task4/
         // 01-service-lifecycle.md, раздел 7.2, пункт 5).
+        std::fflush(nullptr);
         std::_Exit(1);
     }
     destroyer.join();

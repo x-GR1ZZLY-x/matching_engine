@@ -167,9 +167,10 @@ void Server::handleAccept(boost::system::error_code ec, boost::asio::ip::tcp::so
         // владеет косвенно через acceptor_/ioContext_, — тогда неисполненные
         // обработчики (а вместе с ними и захваченные лямбды) уничтожаются
         // вместе с io_context, а не вызываются на уже разрушенном Server.
-        // Верно и в server_main.cpp, и в TestServer (tests/network_tests.cpp,
-        // порядок полей там объявлен намеренно) — перестановка полей в любом
-        // из двух мест молча сломает этот инвариант.
+        // Верно в server_main.cpp и в обеих тестовых обёртках,
+        // TestServer и ManualServer (tests/network_tests.cpp, порядок полей
+        // там объявлен намеренно) — перестановка полей в любом из этих мест
+        // молча сломает этот инвариант.
         auto session = std::make_shared<Session>(std::move(socket), codec_, router_,
             [this] {
                 fatalError_ = true;
