@@ -152,6 +152,17 @@ void Server::doAccept() {
 
 void Server::handleAccept(boost::system::error_code ec, boost::asio::ip::tcp::socket socket) {
     if (!ec) {
+        // REQ-SYS-06: журнал службы обязан отражать в том числе подключение
+        // клиента. Адрес запрашивается перегрузкой с error_code: клиент,
+        // разорвавший соединение между accept и этой строкой, оставляет сокет
+        // без удалённой стороны, и бросающий вариант превратил бы строку
+        // журнала в причину отказа приёма соединений.
+        boost::system::error_code endpointError;
+        const auto remote = socket.remote_endpoint(endpointError);
+        Logger::instance().info("Client connected: " +
+            (endpointError ? std::string("unknown")
+                           : remote.address().to_string() + ":" + std::to_string(remote.port())));
+
         // Сбой сохранения в БД (PersistenceError) касается не
         // одного соединения, а всего сервиса (docs/task4/
         // 02-network-protocol.md, раздел 3.5): после того как
