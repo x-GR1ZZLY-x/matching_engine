@@ -4,6 +4,27 @@ project(matching_engine CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# REQ-TSAN-01, REQ-TSAN-02: отдельная конфигурация сборки под ThreadSanitizer,
+# включаемая опцией -DENABLE_TSAN=ON и не затрагивающая обычную сборку.
+# Флаги идут и в компиляцию, и в компоновку одним и тем же списком —
+# ThreadSanitizer требует линковать runtime, а -g и -fno-omit-frame-pointer
+# нужны ему для читаемых стеков.
+option(ENABLE_TSAN "Собирать с ThreadSanitizer" OFF)
+if(ENABLE_TSAN)
+    # Без явного типа сборки CMake не добавляет ни одного -O: на свежем
+    # клоне у основной конфигурации (build/) умолчания типа сборки в
+    # репозитории тоже нет, поэтому полагаться на "совпадает с build/" нельзя
+    # — совпадение было бы случайностью локального кэша. Фиксируем
+    # RelWithDebInfo (-O2 -g) явно и безусловно через CACHE FORCE, чтобы
+    # результат прогона под санитайзером не зависел от того, задал ли
+    # вызывающий тип сборки сам, и чтобы build-tsan/CMakeCache.txt отражал
+    # реально используемые флаги, а не оставался пустым при живых -O2.
+    set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "" FORCE)
+    set(TSAN_FLAGS -fsanitize=thread -fno-omit-frame-pointer -g)
+    add_compile_options(${TSAN_FLAGS})
+    add_link_options(${TSAN_FLAGS})
+endif()
+
 include(FetchContent)
 
 FetchContent_Declare(
@@ -175,13 +196,20 @@ gtest_discover_tests(matching_engine_tests)
 # WORKING_DIRECTORY = корень репозитория: Application::run применяет схему
 # из относительного пути "database", и часть тестов рассчитывает на рабочий
 # каталог, совпадающий с тем, что использует ctest.
-add_custom_target(
-    memcheck
-    COMMAND valgrind --leak-check=full --show-leak-kinds=all --error-exitcode=1
-        $<TARGET_FILE:matching_engine_tests>
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    DEPENDS matching_engine_tests
-    COMMENT "Running matching_engine_tests under Valgrind memcheck"
-)
+# Цель недоступна в сборке с ENABLE_TSAN: Valgrind и ThreadSanitizer
+# несовместимы (инструментированный ThreadSanitizer-рантайм под Valgrind
+# падает) — без этого ограничения `cmake --build build-tsan --target
+# memcheck` давал бы отказ, который выглядит как дефект памяти, а не как
+# несовместимость инструментов.
+if(NOT ENABLE_TSAN)
+    add_custom_target(
+        memcheck
+        COMMAND valgrind --leak-check=full --show-leak-kinds=all --error-exitcode=1
+            $<TARGET_FILE:matching_engine_tests>
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        DEPENDS matching_engine_tests
+        COMMENT "Running matching_engine_tests under Valgrind memcheck"
+    )
+endif()
 
 

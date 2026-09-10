@@ -15,6 +15,10 @@
 #include <boost/asio.hpp>
 #include <nlohmann/json.hpp>
 
+#include <csignal>
+#include <optional>
+#include <pthread.h>
+
 #include "client.hpp"
 #include "command.hpp"
 #include "command_processor.hpp"
@@ -29,6 +33,7 @@
 #include "recovery_service.hpp"
 #include "request_router.hpp"
 #include "server.hpp"
+#include "signal_handler.hpp"
 #include "test_database.hpp"
 
 using namespace matching_engine;
@@ -36,6 +41,25 @@ using matching_engine::test::g_lastConnectFailure;
 using matching_engine::test::tryConnect;
 
 namespace {
+
+// Восстанавливает маску сигналов процесса на выходе из области видимости —
+// тот же приём и то же обоснование, что и в tests/signal_handler_tests.cpp:
+// SignalHandler::blockSignals() меняет маску вызывающего потока, а маска —
+// свойство процесса, и тест обязан вернуть её в исходное состояние, иначе
+// SIGTERM, посланный этим тестом, ушёл бы дальше в соседние тесты того же
+// бинарника.
+class SignalMaskGuard {
+public:
+    SignalMaskGuard() {
+        pthread_sigmask(SIG_SETMASK, nullptr, &original_);
+    }
+    ~SignalMaskGuard() {
+        pthread_sigmask(SIG_SETMASK, &original_, nullptr);
+    }
+
+private:
+    sigset_t original_{};
+};
 
 // Обёртка "сервер, поднятый в этом же процессе, в отдельном потоке
 // io_context" (обязательное условие ТЗ — иначе до сервера не добраться ни
@@ -2989,4 +3013,93 @@ TEST(NetworkTest, StopCancelsStaleReadTimeoutWhileDrainingQueuedResponse) {
 
     boost::system::error_code ignored;
     clientSocket.close(ignored);
+}
+
+// Единственная межпоточная операция всего проекта — SignalHandler,
+// разбуженный настоящим сигналом, зовущий Server::stop() через post() — до
+// сих пор была измерена под ThreadSanitizer только по частям: "чужой поток
+// зовёт Server::stop()" (тесты выше, где остановку запускает поток теста
+// напрямую) и "sigwait просыпается на настоящий SIGTERM"
+// (tests/signal_handler_tests.cpp, где обработчик — обычная функция без
+// Server). Этот тест сводит обе половины вместе: настоящий SIGTERM, дошедший
+// до sigwait в сигнальном потоке, приводит к вызову Server::stop() из этого
+// потока, а не из потока теста, и Server, живущий в своём io-потоке,
+// действительно останавливается.
+//
+// Живой клиент с завершённым обменом PING/PONG (а не просто открытое
+// соединение) обязателен по тому же доводу, что и в
+// StopDrainsHangingSessionWithoutDeadlock выше: без него сессия ничего не
+// держит на чтении, и остановка без обхода реестра сессий тоже была бы
+// зелёной — тест проверял бы пустую остановку, а не drain.
+TEST(NetworkTest, SignalHandlerStopsServerOnRealSigterm) {
+    SignalMaskGuard maskGuard;
+    ASSERT_TRUE(SignalHandler::blockSignals());
+
+    CommandProcessor processor;
+    RequestRouter router(processor, nullptr);
+    ServerConfig config{"127.0.0.1", 0, 4096};
+    boost::asio::io_context ioContext;
+    Server server(ioContext, config, router);
+    server.start();
+
+    std::thread ioThread([&ioContext] {
+        try {
+            ioContext.run();
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "io_context::run() threw: " << e.what();
+        }
+    });
+
+    Client client(4096);
+    client.connect("127.0.0.1", server.port());
+    const nlohmann::json pong = client.request(nlohmann::json::parse(R"({"type":"PING"})"));
+    // EXPECT, а не ASSERT: io-поток уже запущен, и досрочный возврат из теста
+    // оставил бы его неприсоединённым — это std::terminate вместо падения.
+    EXPECT_EQ(pong.at("status"), "OK");
+
+    // Сессия сейчас висит на чтении следующего кадра — то незавершённое
+    // чтение, которое и обязана закрыть остановка, пришедшая по сигналу.
+    std::optional<SignalHandler> handler;
+    handler.emplace([&server] { server.stop(); });
+
+    ASSERT_EQ(::kill(::getpid(), SIGTERM), 0);
+
+    constexpr std::chrono::seconds kTimeout(5);
+
+    std::promise<void> stopped;
+    std::future<void> stoppedFuture = stopped.get_future();
+    std::thread joiner([&ioThread, &stopped] {
+        ioThread.join();
+        stopped.set_value();
+    });
+
+    if (stoppedFuture.wait_for(kTimeout) != std::future_status::ready) {
+        ADD_FAILURE() << "io_context::run() не вернулась за отведённое время"
+                          " после настоящего SIGTERM";
+        // Присоединять поток, застрявший в незавершившейся run(), нельзя —
+        // это и есть зависание, от которого тест обязан отличаться падением
+        // (docs/task4/01-service-lifecycle.md, раздел 7.2, пункт 5), а не
+        // попыткой join() заблокированного потока.
+        std::fflush(nullptr);
+        std::_Exit(1);
+    }
+    joiner.join();
+
+    // Разрушение SignalHandler (SIGUSR1 + join сигнального потока) —
+    // отдельная возможность зависнуть, не связанная с остановкой Server, и
+    // ограничена по времени тем же приёмом, что и в
+    // tests/signal_handler_tests.cpp.
+    std::promise<void> destroyed;
+    std::future<void> destroyedFuture = destroyed.get_future();
+    std::thread destroyer([&handler, &destroyed] {
+        handler.reset();
+        destroyed.set_value();
+    });
+
+    if (destroyedFuture.wait_for(kTimeout) != std::future_status::ready) {
+        ADD_FAILURE() << "SignalHandler не разрушился (SIGUSR1 + join) за отведённое время";
+        std::fflush(nullptr);
+        std::_Exit(1);
+    }
+    destroyer.join();
 }

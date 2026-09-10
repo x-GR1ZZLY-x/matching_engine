@@ -22,6 +22,13 @@ sigset_t stopSignalSet() {
 }
 
 bool SignalHandler::blockSignals() {
+    // Форсирует создание синглтона Logger (и spdlog::set_default_logger
+    // внутри него) здесь, в главном потоке, до того как появится сигнальный
+    // поток: иначе первым вызовом Logger::instance() в процессе может
+    // оказаться "Received SIGTERM" уже из сигнального потока, и лениво
+    // инициализирующийся конструктор синглтона выполнится там.
+    Logger::instance();
+
     sigset_t set = stopSignalSet();
     // pthread_sigmask, а не sigprocmask (раздел 2.1 документа): маска
     // ставится для конкретного потока (главного) и наследуется потоками,
