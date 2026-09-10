@@ -9,23 +9,90 @@
 namespace matching_engine {
 
 Session::Session(boost::asio::ip::tcp::socket socket, const MessageCodec& codec,
-    RequestRouter& router, std::function<void()> onFatalShutdown)
-    : socket_(std::move(socket)), codec_(codec), router_(router),
+    RequestRouter& router, std::chrono::seconds readTimeout,
+    std::function<void()> onFatalShutdown)
+    : socket_(std::move(socket)), readTimer_(socket_.get_executor()),
+      readTimeout_(readTimeout), codec_(codec), router_(router),
       onFatalShutdown_(std::move(onFatalShutdown)) {}
 
 void Session::start() {
     readHeader();
 }
 
+void Session::armReadTimeout() {
+    auto self = shared_from_this();
+    readTimer_.expires_after(readTimeout_);
+    readTimer_.async_wait([this, self](boost::system::error_code ec) {
+        if (ec || readTimer_.expiry() > boost::asio::steady_timer::clock_type::now()) {
+            // Первое — отменено более свежим вызовом armReadTimeout() или
+            // явным cancelReadTimeout(), обычный случай отмены.
+            // Второе — устаревший обработчик, обогнавший свою отмену: если
+            // этот таймер уже сработал (готов к доставке) в тот же оборот
+            // цикла событий, в котором пришли данные, boost::asio не
+            // откатывает уже поставленный в очередь completion handler —
+            // он получит успешный ec, даже если expires_after()/
+            // expires_at() к этому моменту уже сдвинули дедлайн вперёд
+            // (basic_waitable_timer.hpp, разъяснение у cancel()). Сверка
+            // readTimer_.expiry() с текущим временем отличает такой
+            // устаревший обработчик от настоящего истечения дедлайна: более
+            // свежий armReadTimeout()/cancelReadTimeout() уже успел
+            // отодвинуть expiry() в будущее.
+            return;
+        }
+        // Клиент не прислал ни байта в течение readTimeout_ — это жёсткий
+        // дедлайн (REQ-EXT-04), а не вежливая просьба: сокет закрывается
+        // безусловно, даже если очередь записи не пуста и предыдущий ответ
+        // ещё не дописан. beginClose() здесь не годится — на клиенте,
+        // переставшем и читать, и писать, очередь записи никогда не
+        // опустеет сама, io_context.run() не вернулась бы даже при
+        // остановке сервера. closeAfterWrite_ взводится по тому же
+        // соглашению, что и в остальных точках закрытия сессии — оно
+        // означает "решение принято", даже когда сам вызов дальше идёт
+        // напрямую в closeSocket(), минуя очередь.
+        closeAfterWrite_ = true;
+        closeSocket();
+    });
+}
+
+void Session::cancelReadTimeout() {
+    // expires_at(time_point::max()), а не cancel(): обе операции отменяют
+    // ожидающий wait, но именно сдвиг expiry() далеко в будущее делает
+    // устаревший (уже готовый к доставке) обработчик отличимым в проверке
+    // armReadTimeout() выше — такой обработчик увидит expiry() в далёком
+    // будущем и не станет закрывать сокет. cancel(error_code&) к тому же
+    // deprecated в Boost 1.83 (BOOST_ASIO_NO_DEPRECATED). Безопасна на уже
+    // отменённом или ни разу не взведённом таймере — сама операция есть
+    // просто присваивание нового дедлайна.
+    readTimer_.expires_at(boost::asio::steady_timer::time_point::max());
+}
+
+void Session::armDrainDeadline() {
+    if (closingForShutdown_) {
+        // Остановка сервера: предельное время держит Server (REQ-EXT-09),
+        // а живой таймер здесь оставил бы io_context незавершённую операцию
+        // и не дал run() вернуться самой.
+        cancelReadTimeout();
+        return;
+    }
+    // Обычная работа: читать больше не будем, но очередь записи ещё может
+    // быть не пуста, и клиент, переставший и читать, и писать, иначе оставил
+    // бы сессию висеть без всякого дедлайна (REQ-EXT-04).
+    armReadTimeout();
+}
+
 void Session::readHeader() {
     auto self = shared_from_this();
+    armReadTimeout();
     boost::asio::async_read(socket_, boost::asio::buffer(headerBuffer_),
         [this, self](boost::system::error_code ec, std::size_t /*transferred*/) {
             if (ec) {
                 // Разрыв соединения — штатное событие (REQ-NET-10): новых
                 // операций не запускаем, сессия разрушится сама, когда
                 // последний захваченный shared_ptr выйдет из области
-                // видимости.
+                // видимости. Таймер бездействия отменяется явно — иначе он
+                // остался бы для io_context незавершённой операцией до
+                // истечения readTimeout_ даже после разрыва соединения.
+                cancelReadTimeout();
                 if (ec != boost::asio::error::eof &&
                     ec != boost::asio::error::connection_reset &&
                     ec != boost::asio::error::operation_aborted) {
@@ -55,9 +122,15 @@ void Session::readBody(std::uint32_t payloadSize) {
     // тела выделяется только для значений, не превышающих maxMessageSize
     // (REQ-PROTO-09: проверка до выделения памяти, а не после).
     bodyBuffer_.assign(payloadSize, '\0');
+    // Заголовок уже получен — дедлайн бездействия сброшен заново на время
+    // ожидания тела (REQ-EXT-05, "сбрасывается при каждом успешном чтении").
+    armReadTimeout();
     boost::asio::async_read(socket_, boost::asio::buffer(bodyBuffer_),
         [this, self](boost::system::error_code ec, std::size_t /*transferred*/) {
             if (ec) {
+                // См. комментарий у одноимённой ветки в readHeader(): таймер
+                // отменяется явно, иначе он пережил бы закрытое соединение.
+                cancelReadTimeout();
                 if (ec != boost::asio::error::eof &&
                     ec != boost::asio::error::connection_reset &&
                     ec != boost::asio::error::operation_aborted) {
@@ -157,6 +230,12 @@ void Session::readBody(std::uint32_t payloadSize) {
                 // даёт очереди записи опустеть (REQ-THR-11, REQ-EXT-08).
                 if (!routed.fatal && !closeAfterWrite_) {
                     readHeader();
+                } else {
+                    // Читать больше не будем. Дальше решает
+                    // armDrainDeadline(): при остановке сервера таймер
+                    // снимается, в обычной работе остаётся дедлайном на
+                    // дописывание очереди.
+                    armDrainDeadline();
                 }
                 return;
             } catch (const std::exception& e) {
@@ -183,6 +262,7 @@ void Session::readBody(std::uint32_t payloadSize) {
                 // 02-network-protocol.md, раздел 3.5).
                 closeAfterWrite_ = true;
                 fatalAfterWrite_ = true;
+                armDrainDeadline();
                 return;
             }
             // closeAfterWrite_ уже означает "читать больше нечего": чтение
@@ -196,6 +276,8 @@ void Session::readBody(std::uint32_t payloadSize) {
             // (REQ-THR-11, REQ-EXT-08).
             if (!closeAfterWrite_) {
                 readHeader();
+            } else {
+                armDrainDeadline();
             }
         });
 }
@@ -219,6 +301,18 @@ void Session::beginClose() {
     // взведённого признака безвредны. Это существенно: повторный SIGTERM
     // во время уже идущей остановки обходит реестр сессий снова (раздел
     // 2.4 документа).
+    //
+    // Таймер бездействия отменяется здесь безусловно, а не только на ветке
+    // немедленного закрытия: сессия решила больше не читать в любом случае,
+    // и до отправки накопленного ответа (если очередь не пуста) новый
+    // readHeader()/readBody() эту сессию уже не вызовет. Без явной отмены
+    // таймер остался бы для io_context незавершённой операцией до истечения
+    // readTimeout_, и io_context.run() не вернулась бы сама, пока сессия
+    // ждёт остановки сервера, — тот же класс дефекта, что уже стоил задачи
+    // 08 применительно к shutdownTimer_ сервера (docs/task4/
+    // 01-service-lifecycle.md, раздел 4.1, шаг 7).
+    closingForShutdown_ = true;
+    cancelReadTimeout();
     closeAfterWrite_ = true;
     if (writeQueue_.empty()) {
         closeSocket();
@@ -232,8 +326,12 @@ void Session::closeAfterMessageTooLarge(const std::string& message) {
     // разрушится раньше, чем завершится async_write. closeAfterWrite_
     // взводится заранее — writeNext() закроет сокет сам, когда очередь
     // опустеет, вместо того чтобы читать следующий (уже недоверенный)
-    // кадр (REQ-PROTO-10).
+    // кадр (REQ-PROTO-10). Читать в этой сессии больше не будем, но ждать
+    // отправки — можем, поэтому таймер не снимается, а перевзводится
+    // дедлайном на дописывание очереди (armDrainDeadline()): клиент,
+    // переставший и читать, и писать, иначе оставил бы сессию висеть вечно.
     closeAfterWrite_ = true;
+    armDrainDeadline();
     try {
         // command_id эхировать нечего: тела ещё нет, заголовок кадра сам
         // объявил недопустимый размер (см. комментарий в readHeader()).
@@ -311,6 +409,13 @@ void Session::notifyFatalShutdown() {
 }
 
 void Session::closeSocket() {
+    // Закрытие сокета всегда означает "эта сессия больше не читает" —
+    // блок-предохранитель на случай путей, которые доходят сюда напрямую
+    // (readBody() catch(std::exception), закрытие после ошибки записи в
+    // writeNext()) и ещё не отменили таймер бездействия сами. Вызов
+    // безвреден и там, где вызывающая сторона (beginClose(),
+    // closeAfterMessageTooLarge()) уже отменила его явно.
+    cancelReadTimeout();
     boost::system::error_code ignored;
     socket_.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ignored);
     socket_.close(ignored);

@@ -34,8 +34,17 @@ public:
     // параметром конструктора оно сделано ровно для того, чтобы тесты
     // могли проверить принудительное завершение, не ожидая все десять
     // секунд, — значение по умолчанию менять не нужно и не следует.
+    //
+    // readTimeout — таймаут бездействия соединения (REQ-EXT-04, REQ-EXT-05):
+    // передаётся без изменений в каждую созданную Session. 60 секунд —
+    // разумный запас между командами одного клиента (спокойно переживает
+    // паузу человека за консольным клиентом или медленную сеть), но не
+    // держит забытое соединение вечно. Тот же приём, что и у
+    // shutdownTimeout, — параметр конструктора с разумным умолчанием, а не
+    // поле конфигурации, ради тестируемости малыми значениями.
     Server(boost::asio::io_context& ioContext, const ServerConfig& config,
-        RequestRouter& router, std::chrono::seconds shutdownTimeout = std::chrono::seconds(10));
+        RequestRouter& router, std::chrono::seconds shutdownTimeout = std::chrono::seconds(10),
+        std::chrono::seconds readTimeout = std::chrono::seconds(60));
 
     // Сообщает о готовности строкой "Listening on <адрес>:<порт>"
     // (REQ-NET-13) и начинает принимать соединения. Вызывающая сторона
@@ -104,6 +113,11 @@ private:
     std::string address_;
     unsigned short port_ = 0;
     bool fatalError_ = false;
+
+    // Передаётся без изменений каждой созданной Session (REQ-EXT-04,
+    // REQ-EXT-05) — Server сам с этим таймаутом не работает, только хранит
+    // его для handleAccept().
+    std::chrono::seconds readTimeout_;
 
     // "Идёт остановка" (обычное поле — трогает только сетевой поток,
     // handleAccept() и stop() выполняются в одном io_context): соединение,

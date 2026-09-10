@@ -17,12 +17,14 @@ constexpr std::chrono::milliseconds kDrainPollInterval(20);
 }
 
 Server::Server(boost::asio::io_context& ioContext, const ServerConfig& config,
-    RequestRouter& router, std::chrono::seconds shutdownTimeout)
+    RequestRouter& router, std::chrono::seconds shutdownTimeout,
+    std::chrono::seconds readTimeout)
     : ioContext_(ioContext),
       acceptor_(ioContext),
       codec_(config.maxMessageSize),
       router_(router),
       address_(config.address),
+      readTimeout_(readTimeout),
       shutdownTimer_(ioContext),
       shutdownTimeout_(shutdownTimeout) {
 
@@ -171,7 +173,7 @@ void Server::handleAccept(boost::system::error_code ec, boost::asio::ip::tcp::so
         // TestServer и ManualServer (tests/network_tests.cpp, порядок полей
         // там объявлен намеренно) — перестановка полей в любом из этих мест
         // молча сломает этот инвариант.
-        auto session = std::make_shared<Session>(std::move(socket), codec_, router_,
+        auto session = std::make_shared<Session>(std::move(socket), codec_, router_, readTimeout_,
             [this] {
                 fatalError_ = true;
                 boost::system::error_code ignored;

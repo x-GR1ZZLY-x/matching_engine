@@ -68,6 +68,28 @@ std::string buildPong() {
     return response.dump();
 }
 
+// Формат зафиксирован буквально требованием (REQ-EXT-06) и не расширяется —
+// как и у PING. connection равен nullptr в вырожденной конфигурации без БД
+// (только тесты формата кадра, docs/task4/02-network-protocol.md, раздел
+// 3.3): книги это не касается, но подключения к базе в такой конфигурации
+// точно нет, поэтому "database" честно принимает значение, отличное от
+// "CONNECTED", а не литерал, скрывающий отсутствие проверки. Значение того
+// же поля на живом соединении вычисляется PgConnection::isConnected()
+// (PQstatus), а не констатируется по факту ненулевого указателя: указатель
+// мог пережить сам разрыв соединения на стороне сервера БД. isConnected()
+// отражает состояние, известное libpq по итогам последней выполненной
+// команды, а не результат опроса сервера прямо сейчас — молчаливо оборванное
+// соединение (сервер умер, а команд с тех пор не было) обнаруживается только
+// на следующем запросе.
+std::string buildHealth(const PgConnection* connection) {
+    nlohmann::json response;
+    response["status"] = "OK";
+    response["database"] = (connection != nullptr && connection->isConnected())
+        ? "CONNECTED" : "DOWN";
+    response["engine"] = "READY";
+    return response.dump();
+}
+
 }
 
 RequestRouter::RequestRouter(CommandProcessor& processor, PgConnection* connection)
@@ -198,6 +220,15 @@ RouteResult RequestRouter::handle(const std::string& payload) const {
         return {buildPong(), false, std::nullopt};
     }
 
+    if (type == "HEALTH") {
+        // Служебная команда транспортного уровня, как и PING (docs/task4/
+        // 02-network-protocol.md, раздел 2): маршрутизируется до разбора
+        // команды предметной области, у неё нет command_id, она не идёт в
+        // БД и не касается книги (REQ-EXT-07) — connection_ читается, а не
+        // изменяется.
+        return {buildHealth(connection_), false, std::nullopt};
+    }
+
     if (type == "PRINT") {
         const std::optional<std::string> commandId = extractCommandId(request);
         return {ResponseSerializer::printBook(processor_.orderBook(), commandId), false,
@@ -208,12 +239,9 @@ RouteResult RequestRouter::handle(const std::string& payload) const {
         return handleDomainCommand(request);
     }
 
-    // HEALTH подключается в задаче 10 (docs/task4/02-network-protocol.md,
-    // раздел 2: "PING и HEALTH не проходят через разбор команд предметной
-    // области"); любой другой тип, включая HEALTH, получает тот же ответ,
-    // что и по-настоящему неизвестная команда. type в тексте message
-    // усекается: это пояснение для человека, а не идентификатор, который
-    // клиенту нужно сопоставить с запросом.
+    // Любой другой тип — по-настоящему неизвестная команда. type в тексте
+    // message усекается: это пояснение для человека, а не идентификатор,
+    // который клиенту нужно сопоставить с запросом.
     const std::optional<std::string> commandId = extractCommandId(request);
     return {ResponseSerializer::error(commandId, "INVALID_REQUEST",
         "Unknown command type: " +
