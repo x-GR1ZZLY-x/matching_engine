@@ -1,0 +1,24 @@
+[Unit]
+Description=Matching Engine TCP service
+After=network-online.target postgresql.service
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/matching-engine-server --config /etc/matching-engine/config.json
+EnvironmentFile=/etc/matching-engine/matching-engine.env
+
+DynamicUser=yes
+
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=matching-engine
+
+[Install]
+WantedBy=multi-user.target
