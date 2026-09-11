@@ -148,6 +148,9 @@ int main(int argc, char** argv){
     } catch (const std::exception& e) {
         Logger::instance().error(std::string("Server error: ") + e.what());
         return 1;
+    } catch (...) {
+        Logger::instance().error("Server error: unknown exception");
+        return 1;
     }
 
     // Сбой сохранения в БД (PersistenceError) уже отвечен клиенту как

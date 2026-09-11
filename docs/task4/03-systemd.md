@@ -295,7 +295,7 @@ SyslogIdentifier=matching-engine
 
 ```
 matching-engine[1234]: Connected to database
-matching-engine[1234]: Schema applied
+matching-engine[1234]: Database schema applied
 matching-engine[1234]: Recovered 128 active orders
 matching-engine[1234]: Idempotency cache warmed up: 340 commands
 matching-engine[1234]: Listening on 0.0.0.0:9000

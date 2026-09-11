@@ -21,7 +21,8 @@ install(TARGETS matching-engine-server matching-engine-client
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 install(DIRECTORY database/
-        DESTINATION ${CMAKE_INSTALL_DATADIR}/matching-engine/database)
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/matching-engine/database
+        FILES_MATCHING PATTERN "*.sql")
 
 install(FILES packaging/config/config.json
         DESTINATION ${CMAKE_INSTALL_FULL_SYSCONFDIR}/matching-engine)
@@ -38,6 +39,10 @@ install(FILES packaging/systemd/matching-engine.service
 То же исключение действует для каталогов изменяемого состояния и файлов времени выполнения; для остальных каталогов (`BINDIR`, `DATADIR`) относительная форма верна и используется выше.
 
 Каталог unit-файлов задан абсолютным путём сознательно: он не выводится из префикса установки и определяется менеджером служб, а не соглашениями об именовании каталогов.
+
+Фильтр `FILES_MATCHING PATTERN "*.sql"` в правиле для каталога схемы существен: приложение применяет при старте каждый найденный `.sql`, и без фильтра в пакет ушло бы всё содержимое каталога — черновая миграция из рабочего дерева стала бы изменением, применённым к чужой базе.
+
+Префикс `/usr` задан в `CMakeLists.txt` как умолчание, действующее, когда префикс не передан явно: команда `cmake -B build` без параметров даёт тот же результат, что и с `-DCMAKE_INSTALL_PREFIX=/usr`, а явно переданное значение не перекрывается. В командах ниже префикс всё равно указывается — так намерение видно читателю, не знакомому с содержимым `CMakeLists.txt`.
 
 Проверка ручной установкой, без сборки пакета:
 

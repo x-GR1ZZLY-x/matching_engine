@@ -3061,7 +3061,7 @@ TEST(NetworkTest, SignalHandlerStopsServerOnRealSigterm) {
     std::optional<SignalHandler> handler;
     handler.emplace([&server] { server.stop(); });
 
-    ASSERT_EQ(::kill(::getpid(), SIGTERM), 0);
+    EXPECT_EQ(::kill(::getpid(), SIGTERM), 0);
 
     constexpr std::chrono::seconds kTimeout(5);
 

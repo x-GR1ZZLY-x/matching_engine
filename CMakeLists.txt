@@ -316,6 +316,12 @@ set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
 set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA
     "${CMAKE_SOURCE_DIR}/packaging/debian/conffiles")
 
+# Без этой переменной control-файлы копируются в архив с правами исходника
+# (file(COPY) их сохраняет), а источник лежит на файловой системе, где всё
+# 777. Переменная приводит права control-файлов к правилам Debian независимо
+# от того, откуда они скопированы.
+set(CPACK_DEBIAN_PACKAGE_CONTROL_STRICT_PERMISSION ON)
+
 # include(CPack) должен идти последней строкой: модуль читает переменные
 # CPack в момент подключения, и значение, заданное после него, в пакет не
 # попадёт.

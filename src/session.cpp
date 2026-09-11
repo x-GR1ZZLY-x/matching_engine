@@ -376,6 +376,11 @@ void Session::writeNext() {
                 // ответ, — сервис обязан остановиться так же, как и при
                 // успешной записи (docs/task4/02-network-protocol.md,
                 // раздел 3.5).
+                if (ec != boost::asio::error::eof &&
+                    ec != boost::asio::error::connection_reset &&
+                    ec != boost::asio::error::operation_aborted) {
+                    Logger::instance().debug("Write failed: " + ec.message());
+                }
                 closeSocket();
                 notifyFatalShutdown();
                 return;
