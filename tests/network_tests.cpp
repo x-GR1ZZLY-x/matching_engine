@@ -2983,13 +2983,13 @@ TEST(NetworkTest, StopCancelsStaleReadTimeoutWhileDrainingQueuedResponse) {
 
     // Ответ доставлен целиком — сокет закрыт сервером сразу после него
     // (drain по разделу 4.1 документа), а не молчит и не обрывается раньше
-    // срока.
+    // срока. Чтение с дедлайном (REQ-TEST-11): сервер, который сокет не
+    // закрыл, дал бы зависание, а не падение. Ожидаемый исход — ошибка
+    // (eof), а не байт данных.
     char extra = 0;
-    boost::system::error_code ec;
-    const std::size_t transferred =
-        boost::asio::read(clientSocket, boost::asio::buffer(&extra, 1), ec);
-    EXPECT_EQ(transferred, 0u);
-    EXPECT_TRUE(ec);
+    EXPECT_THROW(
+        readExactWithDeadline(clientSocket, boost::asio::buffer(&extra, 1), std::chrono::seconds(5)),
+        boost::system::system_error);
 
     std::promise<void> stopped;
     std::future<void> stoppedFuture = stopped.get_future();
