@@ -24,18 +24,28 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # нужны ему для читаемых стеков.
 option(ENABLE_TSAN "Собирать с ThreadSanitizer" OFF)
 if(ENABLE_TSAN)
-    # Без явного типа сборки CMake не добавляет ни одного -O: на свежем
-    # клоне у основной конфигурации (build/) умолчания типа сборки в
-    # репозитории тоже нет, поэтому полагаться на "совпадает с build/" нельзя
-    # — совпадение было бы случайностью локального кэша. Фиксируем
-    # RelWithDebInfo (-O2 -g) явно и безусловно через CACHE FORCE, чтобы
-    # результат прогона под санитайзером не зависел от того, задал ли
-    # вызывающий тип сборки сам, и чтобы build-tsan/CMakeCache.txt отражал
-    # реально используемые флаги, а не оставался пустым при живых -O2.
+    # Тип сборки под санитайзером фиксируется безусловно через CACHE FORCE:
+    # RelWithDebInfo (-O2 -g), чтобы результат прогона не зависел от того,
+    # задал ли вызывающий тип сам, и чтобы build-tsan/CMakeCache.txt отражал
+    # реально используемые флаги. Это сознательно другой уровень оптимизации,
+    # чем у основной конфигурации (Release, -O3, умолчание ниже): санитайзеру
+    # нужна отладочная информация и сохранённые фрейм-поинтеры, а не
+    # максимальная оптимизация.
     set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "" FORCE)
     set(TSAN_FLAGS -fsanitize=thread -fno-omit-frame-pointer -g)
     add_compile_options(${TSAN_FLAGS})
     add_link_options(${TSAN_FLAGS})
+endif()
+
+# Тип сборки основной конфигурации по умолчанию — Release. Без этого блока
+# тип задавала бы не конфигурация проекта, а зависимость: spdlog при пустом
+# CMAKE_BUILD_TYPE выставляет Release через CACHE FORCE, и результат был бы
+# верным по случайности — до первой смены или обновления библиотеки. Блок
+# стоит до include(FetchContent), чтобы зависимости увидели уже заданное
+# значение, и после блока санитайзера, где тип задан безусловно. Значение,
+# переданное явно (-DCMAKE_BUILD_TYPE=...), не перекрывается.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
 include(FetchContent)
