@@ -13,7 +13,7 @@ public:
     long long next();
 
     // Выставляет счётчик так, что следующий next() вернёт value.
-    // Нужен при восстановлении книги после рестарта (задача 08).
+    // Нужен при восстановлении книги после рестарта.
     void reset(long long value);
 
     SequenceGenerator(const SequenceGenerator&) = delete;

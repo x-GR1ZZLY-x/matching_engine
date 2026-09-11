@@ -92,7 +92,7 @@ TEST(CliArgsTest, ClientWithoutPortFails){
     EXPECT_FALSE(error.empty());
 }
 
-// Критерий 9 задачи 06: нечисловой порт обязан отвергаться уже при разборе
+// Нечисловой порт обязан отвергаться уже при разборе
 // argv, а не приводить к std::invalid_argument из std::stoi где-то глубже.
 TEST(CliArgsTest, ClientWithNonNumericPortFails){
     std::string host, port, error;

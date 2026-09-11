@@ -129,7 +129,7 @@ TEST(PgWrapperIntegrationTest, CommitPersists){
     EXPECT_EQ(result.getValue(0, 0), "42");
 }
 
-// Критерий 9 задачи 06: перемещение соединения с живой (не разрушенной)
+// Перемещение соединения с живой (не разрушенной)
 // PgTransaction должно быть замечено громко, а не оставлять транзакцию
 // висящей на сервере молча. Сценарий воспроизводит ревью дословно.
 TEST(PgWrapperIntegrationTest, MoveConstructorWithActiveTransactionThrows){
@@ -165,7 +165,7 @@ TEST(PgWrapperIntegrationTest, MoveAssignmentWithActiveTransactionThrows){
     EXPECT_EQ(result.getValue(0, 0), "1");
 }
 
-// Задача 10, находка 4: isConnected() сам по себе не был покрыт ни одним
+// isConnected() сам по себе не был покрыт ни одним
 // тестом — HealthReportsNonConnectedDatabaseWhenNoConnectionIsConfigured
 // (tests/network_tests.cpp) проверяет только ветку "connection == nullptr" в
 // RequestRouter, и мысленная инъекция "return true;" внутри тела

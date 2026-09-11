@@ -364,7 +364,7 @@ TEST(ConfigTest, MaxMessageSizeAtUint32MaxIsAccepted){
 }
 
 // Нижняя граница server.max_message_size (docs/task4/02-network-protocol.md,
-// раздел 4.1, задача 06 критерий 12): значение на один байт меньше границы,
+// раздел 4.1): значение на один байт меньше границы,
 // вычисленной minMaxMessageSize(), обязано отвергаться — короткий ответ об
 // ошибке в такой лимит гарантированно не поместится.
 TEST(ConfigTest, MaxMessageSizeBelowLowerBoundThrowsConfigError){

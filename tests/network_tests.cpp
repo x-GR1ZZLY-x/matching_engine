@@ -304,7 +304,7 @@ void joinIoThreadWithTimeout(TestServer& testServer, std::chrono::seconds timeou
 // StopCancelsStaleReadTimeoutWhileDrainingQueuedResponse — что устаревший
 // таймер не оборвал ещё не законченную отправку ответа. Замечание ревью:
 // раньше этим же приёмом просто вставлялась пауза между раундами теста
-// критерия 5 (FrequentCommandsResetReadTimeoutAndSessionStaysOpen) — там
+// FrequentCommandsResetReadTimeoutAndSessionStaysOpen — там
 // она была неотличима от sleep_for по сути и заменена доказательством через
 // суммарное время жизни соединения без всякой паузы.
 void waitBriefly(std::chrono::milliseconds duration) {
@@ -314,7 +314,7 @@ void waitBriefly(std::chrono::milliseconds duration) {
 
 }
 
-// Критерий 3: PING без обращения к разбору команд предметной области.
+// PING без обращения к разбору команд предметной области.
 TEST(NetworkTest, PingReturnsPong) {
     TestServer testServer(1024);
 
@@ -420,7 +420,7 @@ TEST(NetworkTest, MultibyteUnknownTypeReturnsErrorThenNextCommandSucceeds) {
     EXPECT_EQ(pingResponse.at("result"), "PONG");
 }
 
-// Критерий 6: кадр отправлен четырьмя частями — часть заголовка, остаток
+// Кадр отправлен четырьмя частями — часть заголовка, остаток
 // заголовка, часть тела, остаток тела.
 TEST(NetworkTest, FragmentedFrameIsAssembledCorrectly) {
     TestServer testServer(1024);
@@ -443,7 +443,7 @@ TEST(NetworkTest, FragmentedFrameIsAssembledCorrectly) {
     EXPECT_EQ(response.at("result"), "PONG");
 }
 
-// Критерий 7: три кадра одним вызовом записи, три ответа в том же
+// Три кадра одним вызовом записи, три ответа в том же
 // порядке. Три разных (несуществующих) типа команд дают три разных
 // сообщения об ошибке — так порядок ответов проверяется по содержимому, а
 // не только по счётчику полученных кадров.
@@ -467,7 +467,7 @@ TEST(NetworkTest, ThreeFramesInOneWriteProduceThreeResponsesInOrder) {
     EXPECT_NE(responseC.at("message").get<std::string>().find("CCC"), std::string::npos);
 }
 
-// Критерий 8: заголовок объявляет размер больше server.max_message_size.
+// Заголовок объявляет размер больше server.max_message_size.
 // Клиентский кодек намеренно с бОльшим пределом, чем у сервера, — иначе
 // encodeFrame отверг бы кадр сам, и тест проверял бы клиента, а не сервер.
 TEST(NetworkTest, OversizedMessageIsRejectedConnectionClosesServerStaysAlive) {
@@ -556,7 +556,7 @@ TEST(NetworkTest, MessageTooLargeIsQueuedBehindPendingResponseBeforeClosing) {
     }
 }
 
-// Критерий 9: битый JSON не разрывает соединение — следующая команда в
+// Битый JSON не разрывает соединение — следующая команда в
 // том же соединении выполняется успешно.
 TEST(NetworkTest, InvalidJsonInSameConnectionThenPingSucceeds) {
     TestServer testServer(1024);
@@ -574,7 +574,7 @@ TEST(NetworkTest, InvalidJsonInSameConnectionThenPingSucceeds) {
     EXPECT_EQ(pingResponse.at("result"), "PONG");
 }
 
-// Критерий 10: клиент отключился, не дочитав ответ, — сервер не падает,
+// Клиент отключился, не дочитав ответ, — сервер не падает,
 // следующее подключение обслуживается.
 TEST(NetworkTest, ClientDisconnectWithoutReadingResponseDoesNotCrashServer) {
     TestServer testServer(1024);
@@ -659,7 +659,7 @@ TEST(NetworkTest, StopClosesAcceptorAndDrainsExistingSession) {
 // Команды предметной области, ResponseSerializer, PRINT и идемпотентный
 // ответ по сети (REQ-API-01/02/03/06/07/08/09/10).
 
-// Критерий 1: ADD BUY 100x10, затем ADD SELL 100x4 — ответ на вторую
+// ADD BUY 100x10, затем ADD SELL 100x4 — ответ на вторую
 // команду содержит ровно одну сделку с ожидаемыми полями.
 TEST(NetworkTest, AddThenAddProducesTradeWithOrderId) {
     auto connOpt = tryConnect();
@@ -700,7 +700,7 @@ TEST(NetworkTest, AddThenAddProducesTradeWithOrderId) {
     EXPECT_EQ(trade.at("quantity"), 4);
 }
 
-// Критерий 2: пример запроса из текста задания, вставленный дословно (поле
+// Пример запроса из текста задания, вставленный дословно (поле
 // order_id, а не id) — обе команды обрабатываются успешно, ответы совпадают
 // буквально с примером из "Проект (2).md".
 TEST(NetworkTest, LiteralTaskExampleAddSequenceSucceeds) {
@@ -745,7 +745,7 @@ TEST(NetworkTest, LiteralTaskExampleAddSequenceSucceeds) {
     EXPECT_EQ(second.at("trades")[0].at("quantity"), 4);
 }
 
-// Критерий 3: поле "id" вместо "order_id" — синоним из консольного режима
+// Поле "id" вместо "order_id" — синоним из консольного режима
 // прошлых работ принимается так же, как и новое имя (REQ-API-10).
 TEST(NetworkTest, IdFieldNameIsAcceptedAsOrderIdSynonym) {
     auto connOpt = tryConnect();
@@ -771,7 +771,7 @@ TEST(NetworkTest, IdFieldNameIsAcceptedAsOrderIdSynonym) {
     EXPECT_EQ(response.at("order_id"), 42);
 }
 
-// Критерий 4: CANCEL несуществующей заявки — status ERROR, error
+// CANCEL несуществующей заявки — status ERROR, error
 // ORDER_NOT_FOUND, непустой message, оба поля лежат на верхнем уровне
 // (а не во вложенном объекте ошибки).
 TEST(NetworkTest, CancelNonexistentOrderReturnsOrderNotFound) {
@@ -798,7 +798,7 @@ TEST(NetworkTest, CancelNonexistentOrderReturnsOrderNotFound) {
     EXPECT_FALSE(response.at("message").get<std::string>().empty());
 }
 
-// Критерий 5: после ответа об ошибке в том же соединении следующая
+// После ответа об ошибке в том же соединении следующая
 // корректная команда выполняется успешно — ошибка пользователя не рвёт
 // соединение (REQ-API-07).
 TEST(NetworkTest, ErrorThenValidCommandInSameConnectionSucceeds) {
@@ -830,7 +830,7 @@ TEST(NetworkTest, ErrorThenValidCommandInSameConnectionSucceeds) {
     EXPECT_EQ(okResponse.at("order_id"), 501);
 }
 
-// Критерий 6: MODIFY и рыночная заявка (order_type: MARKET) работают через
+// MODIFY и рыночная заявка (order_type: MARKET) работают через
 // сетевой API. Модифицированная BUY 10x101 теряет временной приоритет
 // (remove + re-add), а встречная MARKET SELL исполняется по цене книжной
 // заявки, а не по своей — у MARKET цены нет вовсе.
@@ -882,7 +882,7 @@ TEST(NetworkTest, ModifyAndMarketOrderWorkOverNetwork) {
     EXPECT_EQ(marketResponse.at("trades")[0].at("quantity"), 3);
 }
 
-// Критерий 7: PRINT возвращает книгу в формате раздела 3.4 контракта, и
+// PRINT возвращает книгу в формате раздела 3.4 контракта, и
 // порядок элементов соответствует приоритету исполнения. Книга заполняется
 // напрямую через CommandProcessor::restoreOrder — без сети и без БД, тем же
 // способом, каким RecoveryService поднимает книгу при старте сервера.
@@ -923,7 +923,7 @@ TEST(NetworkTest, PrintReturnsBookInPriorityOrder) {
     EXPECT_EQ(sell[1].at("order_id"), 4);
 }
 
-// Критерий 8: PRINT показывает остаток частично исполненной заявки
+// PRINT показывает остаток частично исполненной заявки
 // (remaining_quantity), а не исходный объём (initial_quantity).
 TEST(NetworkTest, PrintShowsRemainingQuantityNotInitial) {
     TestServer testServer(4096);
@@ -944,7 +944,7 @@ TEST(NetworkTest, PrintShowsRemainingQuantityNotInitial) {
     EXPECT_EQ(entry.at("quantity"), 4);
 }
 
-// Критерий 9: одна команда с одним command_id отправлена дважды — второй
+// Одна команда с одним command_id отправлена дважды — второй
 // ответ совпадает с первым целиком (включая trades), число сделок в БД
 // не выросло (REQ-API-09, "ловушка идемпотентного ответа"), и — отдельно —
 // повторная отправка не трогает книгу заявок ещё раз. Снимок PRINT снят до
@@ -1050,7 +1050,7 @@ TEST(NetworkTest, MessageTooLargeIsQueuedBehindLargePrintResponse) {
     });
 
     // Таймаут поднят с умолчания в 2 секунды: около 700 КБ на цикл событий
-    // под ThreadSanitizer (задача 12) заметно медленнее, чем на обычной
+    // под ThreadSanitizer заметно медленнее, чем на обычной
     // сборке, и дефолтный таймаут клиента стал бы источником плавающих
     // падений, не связанных с самим протоколом.
     Client client(kServerLimit * 2, std::chrono::seconds(10));
@@ -1102,8 +1102,7 @@ TEST(NetworkTest, MessageTooLargeIsQueuedBehindLargePrintResponse) {
 // Ответ, который сам (а не заявленный клиентом размер запроса) не
 // помещается в max_message_size, обязан дойти до клиента диагностикой с
 // кодом RESPONSE_TOO_LARGE через ту же очередь записи, а соединение — не
-// закрываться (docs/task4/02-network-protocol.md, раздел 4.1, задача 06
-// критерий 11). Запрос (PRINT) был совершенно корректным, кадр запроса
+// закрываться (docs/task4/02-network-protocol.md, раздел 4.1). Запрос (PRINT) был совершенно корректным, кадр запроса
 // прочитан целиком, позиция в потоке известна — следующая команда в этом же
 // соединении обязана выполниться, а не наткнуться на разорванный сокет.
 TEST(NetworkTest, OversizedResponseReturnsResponseTooLargeAndKeepsConnectionAlive) {
@@ -1132,7 +1131,7 @@ TEST(NetworkTest, OversizedResponseReturnsResponseTooLargeAndKeepsConnectionAliv
 
     // Соединение осталось живым: следующая команда в том же соединении
     // (тот же client, тот же сокет) выполняется успешно — это и есть
-    // проверка критерия 11, а не просто "сервер жив и принял кого-то ещё".
+    // проверка того, что соединение осталось рабочим, а не просто "сервер жив и принял кого-то ещё".
     const nlohmann::json pong = client.request(nlohmann::json::parse(R"({"type":"PING"})"));
     EXPECT_EQ(pong.at("status"), "OK");
     EXPECT_EQ(pong.at("result"), "PONG");
@@ -1403,7 +1402,7 @@ TEST(NetworkTest, ConnectToClosedPortFailsWithConnectionErrorNotTimeout) {
 // проверяется как отдельная, наблюдаемая величина, а не смешивается с
 // обычной остановкой теста).
 
-// Критерии 9, 10, 14 (раздел 7.2 документа): сервер поднят в этом же
+// Сервер поднят в этом же
 // процессе, клиент подключён и выполнил полный обмен — сессия принята и
 // висит на чтении следующего кадра. Остановка запускается тем же путём,
 // каким её запускает сигнал (единственное, что делает сигнальный поток над
@@ -1412,12 +1411,12 @@ TEST(NetworkTest, ConnectToClosedPortFailsWithConnectionErrorNotTimeout) {
 // времени: io_context.run() возвращается сама, естественным исчерпанием
 // работы (шаг 7 раздела 4.1), а не по принудительному io_context::stop().
 //
-// Критерий 10 обеспечен тем, что клиент действительно подключён и выполнил
+// Это обеспечено тем, что клиент действительно подключён и выполнил
 // запрос: без этого остановка без единого соединения прошла бы успешно
 // даже в реализации, забывшей обойти реестр сессий, и тест ничего не
 // проверял бы.
 //
-// Критерий 14: инъекция — убрать обход реестра сессий из Server::stop()
+// Инъекция — убрать обход реестра сессий из Server::stop()
 // (цикл "for (const std::weak_ptr<Session>& weak : sessions_) ...") —
 // заставляет этот тест падать по истечении ограничения времени, а не
 // висеть, потому что при исчерпании времени тест завершает свой процесс
@@ -1470,7 +1469,7 @@ TEST(NetworkTest, StopDrainsHangingSessionWithoutDeadlock) {
     joiner.join();
 }
 
-// Критерий 12 (раздел 4.3 документа): по истечении предельного времени
+// По истечении предельного времени
 // остановки сетевой поток останавливает io_context принудительно —
 // наблюдаемо через Server::wasForceStopped(). Малое shutdownTimeout
 // передано явно через параметр конструктора Server, чтобы проверка не
@@ -1548,7 +1547,7 @@ TEST(NetworkTest, StopForcesShutdownAfterDeadlineWhenWriteNeverDrains) {
     clientSocket.close(ignored);
 }
 
-// Критерий 11 (раздел 4.1, шаг 6 документа): сессия с непустой очередью
+// Сессия с непустой очередью
 // записи в момент остановки обязана отправить уже накопленный ответ до
 // закрытия сокета, а не оборваться на середине. Тот же приём
 // синхронизации, что и в тесте принудительного завершения выше: клиент
@@ -1789,8 +1788,8 @@ TEST(NetworkTest, SessionDoesNotServePipelinedCommandsSentAfterStopBegins) {
     clientSocket.close(ignored);
 }
 
-// Критерий 13 (docs/task4/02-network-protocol.md, раздел 4.1, подраздел
-// "Изменяющая команда: команда выполнена, ответ не доставлен"). Заявка,
+// Сценарий из docs/task4/02-network-protocol.md, раздел 4.1, подраздел
+// "Изменяющая команда: команда выполнена, ответ не доставлен". Заявка,
 // заведённая ниже, сопоставляется сразу против kSellOrderCount книжных
 // заявок — ответ на неё несёт столько же сделок и заведомо не помещается в
 // kServerLimit, а сам запрос (несколько десятков байт) — помещается
@@ -2151,7 +2150,7 @@ TEST(NetworkTest, RestartRecoversPartialFillAndPriorityOrderOnDirtyDatabase) {
     // настоящем перезапуске процесса (systemctl restart, REQ-COMPAT-03)
     // этой поблажки нет — там SequenceGenerator стартует заново, и такую
     // регрессию способен поймать только перезапуск процесса целиком, что
-    // проверяется отдельно (задача 15).
+    // проверяется отдельно.
 
     CommandProcessor processor2;
     recoverState(*connOpt, processor2);
@@ -2259,10 +2258,10 @@ TEST(NetworkTest, MarketOrderWithInsufficientLiquidityIsNotAddedToBook) {
     EXPECT_TRUE(printResponse.at("result").at("sell").empty());
 }
 
-// Задача 10: несколько одновременных клиентов, таймаут чтения, HEALTH
+// Несколько одновременных клиентов, таймаут чтения, HEALTH
 // (REQ-EXT-01, REQ-EXT-02, REQ-EXT-04..REQ-EXT-07).
 
-// Критерии 1, 2: три клиента подключены одновременно (ни один сокет не
+// Три клиента подключены одновременно (ни один сокет не
 // закрыт до открытия следующего), каждый выполняет команды над общей
 // книгой, и итоговое состояние книги — сумма их действий: сделка между
 // заявками с РАЗНЫХ соединений, а PRINT с третьего соединения видит эффект
@@ -2333,7 +2332,7 @@ TEST(NetworkTest, ThreeSimultaneousClientsShareOneConsistentOrderBook) {
     EXPECT_TRUE(book.at("result").at("sell").empty());
 }
 
-// Критерий 3: Server не ограничивает число одновременных соединений
+// Server не ограничивает число одновременных соединений
 // искусственно — много клиентов подключены одновременно и все обслужены, ни
 // один не получил отказа и не ждал освобождения места. БД не нужна: команда
 // — PING, число соединений — единственное, что проверяется.
@@ -2395,7 +2394,7 @@ TEST(NetworkTest, ClosingOneSessionOnProtocolErrorDoesNotAffectAnotherOpenSessio
 
 // HEALTH (REQ-EXT-06, REQ-EXT-07).
 
-// Критерий 9: формат ответа совпадает с контрактом побайтово — ровно три
+// Формат ответа совпадает с контрактом побайтово — ровно три
 // поля с этими значениями, ничего лишнего (в частности, command_id из
 // запроса не эхируется, как и у PING).
 TEST(NetworkTest, HealthReturnsExactContractShapeWithLiveDatabase) {
@@ -2416,7 +2415,7 @@ TEST(NetworkTest, HealthReturnsExactContractShapeWithLiveDatabase) {
     EXPECT_EQ(response, expected);
 }
 
-// Критерий 10: HEALTH не требует command_id, не пишет в processed_commands
+// HEALTH не требует command_id, не пишет в processed_commands
 // и не трогает книгу — снимок PRINT до и после совпадает, а единственная
 // строка в processed_commands принадлежит ADD, отправленному до HEALTH.
 TEST(NetworkTest, HealthDoesNotChangeEngineOrDatabaseState) {
@@ -2463,7 +2462,7 @@ TEST(NetworkTest, HealthDoesNotChangeEngineOrDatabaseState) {
     EXPECT_EQ(commandCount.getValue(0, 0), "1");
 }
 
-// Критерий 11: поле database вычисляется, а не является литералом —
+// Поле database вычисляется, а не является литералом —
 // значение отличается от "CONNECTED", когда соединение с базой не
 // сконфигурировано (RequestRouter построен с connection == nullptr, самая
 // дешёвая точка различения, которой уже пользуются тесты формата кадра
@@ -2482,7 +2481,7 @@ TEST(NetworkTest, HealthReportsNonConnectedDatabaseWhenNoConnectionIsConfigured)
 
 // Таймаут чтения (REQ-EXT-04, REQ-EXT-05).
 
-// Критерий 4: клиент подключился и не присылает данных — по истечении
+// Клиент подключился и не присылает данных — по истечении
 // таймаута сервер закрывает соединение, и клиент наблюдает конец потока
 // (событие, а не время: receiveFrame() блокируется на чтении, а не на
 // ожидании часов).
@@ -2735,12 +2734,12 @@ TEST(NetworkTest, ReadTimeoutClosesSessionWaitingToDrainAfterProtocolError) {
     drainJoiner.join();
 }
 
-// Критерий 5: клиент, присылающий команды чаще таймаута, работает сколь
+// Клиент, присылающий команды чаще таймаута, работает сколь
 // угодно долго — таймер сбрасывается при каждом успешном чтении, а не
 // отсчитывается от подключения. Замечание ревью: пауза между раундами,
 // организованная ожиданием на никогда не наполняемом future
 // (std::promise::get_future().wait_for()), семантически неотличима от
-// std::this_thread::sleep_for и делает запрет sleep_for (критерий 7)
+// std::this_thread::sleep_for и делает запрет sleep_for
 // проверкой орфографии, а не поведения. Вместо паузы команды идут плотным
 // циклом без остановок, а доказательством служит суммарное время жизни
 // соединения: цикл продолжается, пока оно не превысит kReadTimeout, и после
@@ -2796,7 +2795,7 @@ TEST(NetworkTest, FrequentCommandsResetReadTimeoutAndSessionStaysOpen) {
         << "цикл завершился быстрее readTimeout — тест не доказал превышение";
 }
 
-// Критерий 8: остановка сервера с соединением, ожидающим по таймауту,
+// Остановка сервера с соединением, ожидающим по таймауту,
 // завершается штатно — io_context.run() обязана вернуться сама, а не по
 // исчерпании shutdownTimeout. readTimeout выбран заведомо больше и
 // shutdownTimeout, и отведённого тесту времени ожидания: если beginClose()
@@ -2878,8 +2877,8 @@ TEST(NetworkTest, StopReturnsPromptlyEvenWhileSessionWaitsOnReadTimeout) {
 // большего readTimeout (1 секунда): если бы отмена в beginClose()
 // отсутствовала, устаревший таймер сработал бы посреди паузы и
 // (после исправления находки 2) безусловно закрыл бы сокет, оборвав ещё не
-// законченную отправку ответа, — критерий 12 требует, чтобы стоп-сигнал не
-// прерывал уже начатую отправку раньше срока. Предохранитель внутри
+// законченную отправку ответа — стоп-сигнал не должен
+// прерывать уже начатую отправку раньше срока. Предохранитель внутри
 // closeSocket() (отдельная отмена там же) не убирается этим тестом и
 // продолжает защищать остальные пути закрытия — здесь целенаправленно
 // проверяется именно путь "очередь не пуста", которым он не пользуется.

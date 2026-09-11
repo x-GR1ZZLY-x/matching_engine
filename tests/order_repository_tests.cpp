@@ -32,7 +32,7 @@ OrderChange makeChange(int id, Side side, std::optional<int> price,
 
 }
 
-// Критерии 7 и 10: пустая цена рыночной заявки должна читаться как NULL, а
+// Пустая цена рыночной заявки должна читаться как NULL, а
 // не как пустая строка — различить их можно только через isNull().
 TEST(OrderRepositoryTest, MarketOrderPriceIsStoredAndReadAsNullNotEmptyString){
     auto connOpt = tryConnect();
@@ -81,7 +81,7 @@ TEST(OrderRepositoryTest, LimitOrderPriceIsNotNull){
     EXPECT_EQ(result.getValue(0, 0), "150");
 }
 
-// Критерий 5: загрузка активных заявок возвращает их строго в порядке
+// Загрузка активных заявок возвращает их строго в порядке
 // возрастания номера последовательности — вставлены в обратном порядке.
 TEST(OrderRepositoryTest, LoadActiveReturnsOrdersOrderedBySequenceNumber){
     auto connOpt = tryConnect();
@@ -114,7 +114,7 @@ TEST(OrderRepositoryTest, LoadActiveReturnsOrdersOrderedBySequenceNumber){
     EXPECT_EQ(testOrders[2]->getId(), 900000203);
 }
 
-// Критерий 6: загруженная заявка сохраняет записанные номер
+// Загруженная заявка сохраняет записанные номер
 // последовательности, исходное количество и статус — они не пересоздаются.
 TEST(OrderRepositoryTest, LoadActivePreservesSequenceNumberInitialQuantityAndStatus){
     auto connOpt = tryConnect();
@@ -163,7 +163,7 @@ TEST(OrderRepositoryTest, LoadActiveExcludesFilledAndCancelledOrders){
     }
 }
 
-// Пункт 3a задачи 06: у рыночной заявки (пустая цена) активных статусов
+// У рыночной заявки (пустая цена) активных статусов
 // быть не может — save() должен отказать fail-fast, а не сохранить строку,
 // на которой позже упадёт loadActive() при рестарте.
 TEST(OrderRepositoryTest, SaveRejectsActiveMarketOrder){
@@ -181,7 +181,7 @@ TEST(OrderRepositoryTest, SaveRejectsActiveMarketOrder){
         OrderStatus::PartiallyFilled, 900000702)), MatchingEngineError);
 }
 
-// Задача 08, критерий 4: maxSequenceNumber() обязан видеть исполненную
+// maxSequenceNumber() обязан видеть исполненную
 // заявку с номером выше, чем у любой активной, — loadActive() её не вернёт
 // (фильтр по статусу), поэтому взять максимум только по её результату было
 // бы ровно той ошибкой, о которой предупреждает критерий.

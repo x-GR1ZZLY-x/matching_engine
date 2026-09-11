@@ -21,7 +21,7 @@ constexpr const char* kUsage =
     "  Commands that change state (ADD, CANCEL, MODIFY) must include a "
     "unique \"command_id\" field; PRINT does not need one.\n";
 
-// Размер пакета при --replay --batch (задача 12, REQ-OPT-03): каждые
+// Размер пакета при --replay --batch (REQ-OPT-03): каждые
 // столько команд накопленное сохраняется одной транзакцией (см.
 // CommandProcessor::flushBatch). Число не выносится отдельным ключом
 // командной строки — задача явно этого не просит, а внутренняя константа
@@ -50,8 +50,9 @@ std::string describeSchemaFailure(const std::string& schemaDir){
 }
 
 // Человеческое сообщение для сбоя сохранения (PersistenceError): книга в
-// памяти уже изменена, а в БД — нет, поэтому процесс завершается (fail-fast,
-// docs/plan.md, "Обработка ошибок: два разных класса"). Симметрично двум
+// памяти уже изменена, а в БД — нет, поэтому процесс завершается (fail-fast;
+// фатальные ошибки, в отличие от ошибок отдельной команды, прерывают весь
+// процесс). Симметрично двум
 // сообщениям выше: сырой текст драйвера/сервера, пришедший в e.what() через
 // PersistenceService -> DatabaseError -> PQerrorMessage/PQresultErrorMessage,
 // уходит только в отладочный лог, а не в это сообщение — иначе имена таблиц,
@@ -89,7 +90,7 @@ bool Application::parseArgs(int argc, char** argv, std::string& configPath,
             replayPath = argv[++i];
             hasReplay = true;
         } else if(arg == "--batch"){
-            // Флаг без значения, как в описании задачи 12 — следующий
+            // Флаг без значения — следующий
             // аргумент не поглощается.
             batch = true;
         } else if(arg.rfind("--", 0) == 0){
@@ -110,7 +111,7 @@ bool Application::parseArgs(int argc, char** argv, std::string& configPath,
     }
 
     if(batch && !hasReplay){
-        // Критерий 4 задачи 12: пакетная запись — только вместе с --replay,
+        // Пакетная запись — только вместе с --replay,
         // без него это ошибка разбора, как и прочие недопустимые сочетания.
         errorMessage = "Option --batch requires --replay";
         return false;
@@ -154,7 +155,7 @@ int Application::run(int argc, char** argv){
     // Соединение открывается один раз здесь и живёт до конца run() —
     // весь жизненный цикл приложения. Освобождается деструктором PgConnection
     // при выходе из функции — ручного закрытия соединения нет нигде в этом
-    // файле (REQ-RAII-09, критерий 8 задачи 07).
+    // файле (REQ-RAII-09).
     std::optional<PgConnection> connection;
     try{
         connection.emplace(config.host, config.port, config.dbname,
@@ -178,7 +179,7 @@ int Application::run(int argc, char** argv){
     }
 
     // Восстановление обязано завершиться прежде первой обрабатываемой
-    // команды (docs/tasks/task-08.md): книга, счётчик номеров и кеш
+    // команды: книга, счётчик номеров и кеш
     // идемпотентности должны быть в порядке, унаследованном от прошлых
     // запусков, до того как движок увидит новый JSON-пакет.
     try{
@@ -192,8 +193,8 @@ int Application::run(int argc, char** argv){
 
     // Режим воспроизведения нагрузки идёт по отдельной ветке, но через ту
     // же цепочку старта выше (конфигурация -> соединение -> схема ->
-    // recoverState) — критерий 7 задачи 10. PersistenceError фатальна и в
-    // этом режиме (docs/plan.md, "Обработка ошибок: два разных класса"),
+    // recoverState). PersistenceError фатальна и в
+    // этом режиме (фатальные ошибки, в отличие от ошибок отдельной команды, прерывают весь процесс),
     // поэтому она перехватывается здесь так же, как ниже для обычного
     // режима, а не поглощается внутри runReplay.
     if(!replayPath.empty()){
@@ -226,7 +227,7 @@ int Application::run(int argc, char** argv){
     // не объект (например, top-level число или массив); это исключение не
     // наследует MatchingEngineError и ничем в этом файле не перехватывается,
     // поэтому проверка нужна раньше, до входа в try ниже, иначе это тот же
-    // неперехваченный terminate, от которого предостерегает критерий 5.
+    // неперехваченный terminate.
     if(!root.is_object() || !root.contains("commands") || !root["commands"].is_array()){
         const std::string message = "Invalid input: top-level JSON must be an object "
             "with a \"commands\" array field.";
@@ -235,12 +236,10 @@ int Application::run(int argc, char** argv){
         return 1;
     }
 
-    // Сбой сохранения — фатальная, а не командная ошибка (docs/plan.md,
-    // "Обработка ошибок: два разных класса"): к моменту, когда
+    // Сбой сохранения — фатальная, а не командная ошибка: к моменту, когда
     // PersistenceError долетает сюда, книга в памяти уже изменена, а в БД —
     // нет, продолжать работу на расходящемся состоянии нельзя. Обработчик
-    // здесь, вокруг всего цикла, — это то самое место, о котором
-    // предупреждает критерий 5: без него исключение размотало бы стек мимо
+    // здесь, вокруг всего цикла, — это то самое место: без него исключение размотало бы стек мимо
     // main() и обернулось бы неперехваченным std::terminate.
     try{
         for(const auto& commandJson : root["commands"]){
@@ -277,10 +276,10 @@ Application::CommandOutcome Application::processCommand(const nlohmann::json& co
     ExecutionResult result;
     bool servedFromCache = false;
     try{
-        // batch (--replay --batch, задача 12) откладывает запись в БД до
+        // batch (--replay --batch) откладывает запись в БД до
         // flushBatch — сопоставление и кеш идемпотентности отрабатывают как
         // обычно. Штатный режим (batch == false) вызывает process() без
-        // единого изменения — критерий 3 задачи 12.
+        // единого изменения.
         if(batch){
             result = processor_.processBatched(*command, &servedFromCache);
         } else {
@@ -290,8 +289,7 @@ Application::CommandOutcome Application::processCommand(const nlohmann::json& co
         // PersistenceError наследует MatchingEngineError (конвенция
         // проекта) — обязан быть перехвачен и проброшен раньше
         // catch(const MatchingEngineError&) ниже, иначе тот перехватит его
-        // как обычную командную ошибку и проглотит (docs/tasks/task-07.md,
-        // п.5). Дальше исключение ловит цикл в run() (обычный режим) либо
+        // как обычную командную ошибку и проглотит. Дальше исключение ловит цикл в run() (обычный режим) либо
         // runReplay (режим воспроизведения) — обоим он должен быть фатален.
         throw;
     } catch(const MatchingEngineError& e){
@@ -304,8 +302,8 @@ Application::CommandOutcome Application::processCommand(const nlohmann::json& co
     // как и раньше, — независимо от того, обслужена ли команда из кеша
     // идемпотентности (поведение обычного режима задачей 10 менять
     // запрещено). В режиме --replay печать отдельных строк TRADE намеренно
-    // отключена (docs/tasks/task-10.md): при 100 000+ командах это были бы
-    // десятки тысяч строк в stdout, а задача 11 профилирует именно этот
+    // отключена: при 100 000+ командах это были бы
+    // десятки тысяч строк в stdout, а профилирование замеряет именно этот
     // режим — вывод в терминал исказил бы замер работы движка и БД. Число
     // сделок вместо этого уходит в итоговую сводку.
     if(printTrades){
@@ -315,7 +313,7 @@ Application::CommandOutcome Application::processCommand(const nlohmann::json& co
     }
 
     if(servedFromCache){
-        // Ревью задачи 10, правка 1: команда пришла из кеша идемпотентности
+        // Команда пришла из кеша идемпотентности
         // и в этом вызове ничего не записала в БД — trades == 0, чтобы
         // runReplay не считал сделки повтора второй раз.
         return CommandOutcome{CommandOutcome::Status::Duplicate, 0};
@@ -333,8 +331,8 @@ bool Application::runReplay(const std::string& path, PgConnection& connection, b
     }
 
     const auto start = std::chrono::steady_clock::now();
-    // Счётчики отражают три разных исхода команды, а не долю строк файла
-    // (ревью задачи 10, правка 1). Обещание перед критерием 7: processed ==
+    // Счётчики отражают три разных исхода команды, а не долю строк файла.
+    // Гарантия: processed ==
     // число строк, реально добавленных в processed_commands в этом прогоне;
     // trades == число строк, добавленных в trades. duplicates и skipped в
     // это равенство не входят — строки PRINT тоже не входят ни в один
@@ -345,7 +343,7 @@ bool Application::runReplay(const std::string& path, PgConnection& connection, b
     long long duplicateCount = 0;
     long long skippedCount = 0;
 
-    // Потоковое чтение построчно (REQ-PERF-02, критерий 4 задачи 10): файл
+    // Потоковое чтение построчно (REQ-PERF-02): файл
     // не грузится в память целиком, в любой момент в памяти — одна строка.
     std::string line;
     while(std::getline(file, line)){
@@ -364,8 +362,8 @@ bool Application::runReplay(const std::string& path, PgConnection& connection, b
         }
 
         // PersistenceError не перехватывается здесь — она должна дойти до
-        // run(), который завершает процесс (см. критерий 4 задания и
-        // docs/plan.md, "Обработка ошибок: два разных класса"). В пакетном
+        // run(), который завершает процесс (фатальные ошибки, в отличие от
+        // ошибок отдельной команды, прерывают весь процесс). В пакетном
         // режиме она может прилететь только из flushBatch ниже — processCommand
         // с batch == true в БД не пишет вовсе.
         const CommandOutcome outcome = processCommand(commandJson, connection,
@@ -386,7 +384,7 @@ bool Application::runReplay(const std::string& path, PgConnection& connection, b
         }
 
         // Сброс пакета каждые kReplayBatchSize накопленных команд
-        // (docs/tasks/task-12.md, "Накопление и сброс пакета"). pendingCount()
+        // pendingCount()
         // считает реально отложенные записи, а не строки файла, — PRINT,
         // повторы идемпотентности и ошибочные строки в пакет не попадают.
         if(batch && processor_.pendingCount() >= kReplayBatchSize){
@@ -397,14 +395,14 @@ bool Application::runReplay(const std::string& path, PgConnection& connection, b
     // Остаток пакета обязан быть сброшен после конца файла независимо от
     // того, как цикл завершился, — иначе последние (неполные kReplayBatchSize)
     // команды пропали бы из БД, хотя уже попали в кеш идемпотентности и в
-    // сводку ниже (docs/tasks/task-12.md, критерий 7).
+    // сводку ниже.
     if(batch){
         processor_.flushBatch(connection);
     }
 
     // getline возвращает false и по достижении конца файла (eof, прогон
-    // успешен), и при сбое чтения потока (failbit/badbit без eof — ревью
-    // задачи 10, правка 4: путь указывает на каталог, поток открывается,
+    // успешен), и при сбое чтения потока (failbit/badbit без eof — путь
+    // указывает на каталог, поток открывается,
     // но каждый getline проваливается). Пустой файл — законный вход и не
     // должен приниматься за ошибку, поэтому проверяем именно badbit, а не
     // общий !file.

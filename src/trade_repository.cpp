@@ -31,7 +31,7 @@ void TradeRepository::insert(PgConnection& connection, const Trade& trade){
         std::to_string(trade.getQuantity())
     };
 
-    // Выполняется на каждой сделке — подготовленный запрос (задача 12)
+    // Выполняется на каждой сделке — подготовленный запрос
     // экономит повторный разбор и планирование этой вставки.
     connection.executePrepared(
         "trade_repository_insert",

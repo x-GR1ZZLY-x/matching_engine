@@ -89,7 +89,7 @@ int main(int argc, char** argv){
     }
 
     // RequestRouter владеет ссылками на processor и connection всё время
-    // работы сервера (задача 05): ADD/CANCEL/MODIFY идут через
+    // работы сервера: ADD/CANCEL/MODIFY идут через
     // CommandParser и processor, PRINT читает processor.orderBook()
     // напрямую, PING обрабатывается до разбора команды.
     RequestRouter router(processor, &*connection);

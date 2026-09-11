@@ -25,7 +25,7 @@ std::array<char, kFrameHeaderSize> bigEndianHeader(std::uint32_t value){
 
 }
 
-// Критерий 1: кодирование и декодирование симметричны побайтово. Тело
+// Кодирование и декодирование симметричны побайтово. Тело
 // содержит внутренний нулевой байт: для кодека тело — непрозрачные байты, а
 // не C-строка, и реализация, копирующая тело как C-строку (strcpy-подобным
 // путём), должна проиграть это сравнение std::string целиком.
@@ -48,7 +48,7 @@ TEST(MessageCodecTest, EncodeDecodeRoundTripIsByteForByteSymmetric){
     EXPECT_EQ(decodedPayload, payload);
 }
 
-// Критерий 2: заголовок содержит длину именно в сетевом порядке байт.
+// Заголовок содержит длину именно в сетевом порядке байт.
 // Проверяются сырые байты кадра, а не результат обратного преобразования.
 // Длина выбрана так, чтобы значимыми были минимум два байта из четырёх
 // (258 = 0x00000102): на длине 1 три байта из четырёх нулевые, и реализация,
@@ -94,7 +94,7 @@ TEST(MessageCodecTest, EncodeEmptyPayloadProducesFourZeroBytes){
     }
 }
 
-// Критерий 3: заголовок, объявляющий размер больше максимального,
+// Заголовок, объявляющий размер больше максимального,
 // отвергается. decodeHeader не выделяет память под тело сам по себе — тело
 // в кодек вообще не передаётся, это проверяется чтением кода.
 TEST(MessageCodecTest, RejectsSizeAboveMaximum){
@@ -104,7 +104,7 @@ TEST(MessageCodecTest, RejectsSizeAboveMaximum){
     EXPECT_THROW(codec.decodeHeader(header), MessageTooLargeError);
 }
 
-// Критерий 4: заявленный размер порядка 2 ГБ приводит только к отказу, а не
+// Заявленный размер порядка 2 ГБ приводит только к отказу, а не
 // к выделению памяти или аварийному завершению.
 TEST(MessageCodecTest, RejectsSizeNearTwoGigabytesWithoutCrashing){
     const MessageCodec codec(1024);
@@ -122,7 +122,7 @@ TEST(MessageCodecTest, RejectsSizeNearUint32MaxWithoutOverflow){
     EXPECT_THROW(codec.decodeHeader(header), MessageTooLargeError);
 }
 
-// Критерий 5: граничные значения — размер, равный максимальному, принят;
+// Граничные значения — размер, равный максимальному, принят;
 // размер на единицу больше — отвергнут.
 TEST(MessageCodecTest, AcceptsExactMaximumAndRejectsOneAboveIt){
     const MessageCodec codec(100);
@@ -134,7 +134,7 @@ TEST(MessageCodecTest, AcceptsExactMaximumAndRejectsOneAboveIt){
     EXPECT_THROW(codec.decodeHeader(aboveMax), MessageTooLargeError);
 }
 
-// Критерий 6: нулевой размер полезной нагрузки корректен на уровне кадра
+// Нулевой размер полезной нагрузки корректен на уровне кадра
 // (docs/task4/02-network-protocol.md, раздел 1.2) — decodeHeader его не
 // отвергает, решение о пустой строке принимается позже, при разборе JSON.
 TEST(MessageCodecTest, ZeroPayloadSizeIsAcceptedAtFrameLevel){

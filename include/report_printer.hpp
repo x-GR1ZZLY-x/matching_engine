@@ -18,8 +18,7 @@ public:
     // попадать в stdout вперемешку с TRADE/ORDER BOOK/REPLAY SUMMARY.
     void printUsage(const std::string& usage) const;
 
-    // Итоговая сводка режима --replay (задача 10, критерий 3; уточнено
-    // ревью, правка 1). processedCommands и trades — счётчики только для
+    // Итоговая сводка режима --replay. processedCommands и trades — счётчики только для
     // команд со статусом Applied: processedCommands равен числу строк,
     // добавленных в этом прогоне в processed_commands, trades — числу
     // строк, добавленных в trades. Команда, обслуженная из кеша
@@ -32,7 +31,7 @@ public:
         long long duplicates, long long skippedLines,
         std::chrono::milliseconds elapsed) const;
 
-    // Ответ сервера matching-engine-client (задача 06): полезная нагрузка
+    // Ответ сервера matching-engine-client: полезная нагрузка
     // кадра ответа уже готовая строка JSON (её строит сервер, а клиент
     // только доставляет байты через Client — REQ-CLI-04), поэтому здесь
     // печатается буквально, без разбора и повторной сериализации.

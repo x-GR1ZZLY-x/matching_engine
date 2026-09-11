@@ -104,7 +104,7 @@ std::unique_ptr<Command> CommandParser::parse(const nlohmann::json& j) const{
     else if(type == "MODIFY") command = parseModify(j);
     else throw ParseError("Unknown command type");
 
-    // command_id — необязательное поле на уровне парсера (задача 07, п.4):
+    // command_id — необязательное поле на уровне парсера:
     // обязательность для изменяющих команд проверяет CommandProcessor.
     if(j.contains("command_id")){
         command->commandId_ = requireString(j, "command_id");

@@ -12,7 +12,7 @@ namespace matching_engine{
 
 // Протокольный предел PostgreSQL: расширенный протокол несёт число
 // параметров запроса в 16-битном поле, поэтому один PQexecParams/execute()
-// не может принять больше 65535 значений (задача 12, правка 1).
+// не может принять больше 65535 значений.
 constexpr std::size_t kMaxSqlParameters = 65535;
 
 // Общий для OrderRepository::saveBatch, TradeRepository::insertBatch и
