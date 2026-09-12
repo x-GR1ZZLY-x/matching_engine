@@ -15,7 +15,7 @@ OrderChange makeChange(int id, Side side, std::optional<int> price, int initialQ
 
 }
 
-// Задача 08, "Условия работы": сериализация в processed_commands.result и
+// Сериализация в processed_commands.result и
 // разбор обратно живут рядом в CommandProcessor и обязаны быть точной парой —
 // это тот самый round-trip тест, который ловит расхождение форматов, не
 // требуя базы.
@@ -70,7 +70,7 @@ TEST(CommandProcessorTest, SerializeParseRoundTripHandlesEmptyResult){
 }
 
 // MODIFY кладёт в orderChanges два снимка одной заявки — старый в начале,
-// новый в конце (docs/progress.md, "Задача 05"): порядок значим, побеждает
+// новый в конце: порядок значим, побеждает
 // последняя запись с этим id. Разбор обязан сохранить порядок массива.
 TEST(CommandProcessorTest, SerializeParseRoundTripPreservesOrderOfDuplicateIds){
     ExecutionResult result;
@@ -85,7 +85,7 @@ TEST(CommandProcessorTest, SerializeParseRoundTripPreservesOrderOfDuplicateIds){
     EXPECT_EQ(parsed.orderChanges[1].sequenceNumber, 2);
 }
 
-// Критерий 3 задачи 08: restoreOrder кладёт заявки в книгу через
+// restoreOrder кладёт заявки в книгу через
 // MatchingEngine::restore -> OrderBook::restore, минуя сопоставление — даже
 // пересекающиеся по цене BUY/SELL не должны породить сделку.
 TEST(CommandProcessorTest, RestoreOrderPutsCrossingOrdersIntoBookWithoutMatching){
@@ -106,7 +106,7 @@ TEST(CommandProcessorTest, RestoreOrderPutsCrossingOrdersIntoBookWithoutMatching
     EXPECT_EQ(processor.orderBook().findOrder(2)->getQuantity(), 5);
 }
 
-// Задача 08, "Доменные правила", п.8: колонка processed_commands.result
+// Колонка processed_commands.result
 // nullable — прогрев кеша обязан пережить NULL, а не упасть при старте.
 TEST(CommandProcessorTest, WarmCacheAcceptsNullResultWithoutThrowing){
     CommandProcessor processor;

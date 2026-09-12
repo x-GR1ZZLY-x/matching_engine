@@ -11,7 +11,7 @@ using namespace matching_engine;
 using matching_engine::test::g_lastConnectFailure;
 using matching_engine::test::tryConnect;
 
-// Решение "без ON CONFLICT" (задача 06, п.3): повторное сохранение команды
+// Решение "без ON CONFLICT": повторное сохранение команды
 // с тем же идентификатором должно приводить к ошибке нарушения уникальности,
 // а не молча перезаписывать или игнорировать строку.
 TEST(CommandRepositoryTest, SaveWithDuplicateIdThrowsInsteadOfIgnoring){

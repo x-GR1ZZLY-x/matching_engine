@@ -129,7 +129,7 @@ TEST(PgWrapperIntegrationTest, CommitPersists){
     EXPECT_EQ(result.getValue(0, 0), "42");
 }
 
-// Критерий 9 задачи 06: перемещение соединения с живой (не разрушенной)
+// Перемещение соединения с живой (не разрушенной)
 // PgTransaction должно быть замечено громко, а не оставлять транзакцию
 // висящей на сервере молча. Сценарий воспроизводит ревью дословно.
 TEST(PgWrapperIntegrationTest, MoveConstructorWithActiveTransactionThrows){
@@ -163,6 +163,39 @@ TEST(PgWrapperIntegrationTest, MoveAssignmentWithActiveTransactionThrows){
     PgResult result = sourceOpt->execute("SELECT 1");
     ASSERT_EQ(result.rowCount(), 1);
     EXPECT_EQ(result.getValue(0, 0), "1");
+}
+
+// isConnected() сам по себе не был покрыт ни одним
+// тестом — HealthReportsNonConnectedDatabaseWhenNoConnectionIsConfigured
+// (tests/network_tests.cpp) проверяет только ветку "connection == nullptr" в
+// RequestRouter, и мысленная инъекция "return true;" внутри тела
+// isConnected() осталась бы незамеченной. На живом, только что открытом
+// соединении isConnected() обязан вернуть true; после того как соединение
+// оборвано и это обнаружено провалом следующей команды, — false.
+TEST(PgWrapperIntegrationTest, IsConnectedReflectsActualConnectionState){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    auto& conn = *connOpt;
+
+    EXPECT_TRUE(conn.isConnected());
+
+    // Обрывает собственное соединение со стороны сервера. Сам этот вызов
+    // может и не вернуть результат клиенту (бэкенд способен завершиться
+    // раньше, чем успеет отправить ответ) — оба исхода здесь ожидаемы, тест
+    // проверяет не его, а команду ниже.
+    try{
+        conn.execute("SELECT pg_terminate_backend(pg_backend_pid())");
+    }catch(const DatabaseError&){
+    }
+
+    // PQstatus не опрашивает сеть (см. докстроку isConnected() в
+    // pg_connection.hpp) — он переходит в CONNECTION_BAD только по итогам
+    // неудачной команды, поэтому оборванность соединения обнаруживается
+    // именно здесь, а не в момент самого обрыва.
+    EXPECT_THROW(conn.execute("SELECT 1"), DatabaseError);
+    EXPECT_FALSE(conn.isConnected());
 }
 
 TEST(PgWrapperIntegrationTest, NullParameterReachesServerAsNull){

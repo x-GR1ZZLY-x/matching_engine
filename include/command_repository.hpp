@@ -8,7 +8,7 @@
 namespace matching_engine{
 
 // Строка таблицы processed_commands. result — уже сериализованный JSON
-// результата исполнения (сериализация — задача 07), репозиторий его не
+// результата исполнения (сериализация — CommandProcessor), репозиторий его не
 // разбирает и не строит, только хранит и возвращает как строку. Столбец
 // result — JSONB и nullable, отсюда std::optional<std::string>.
 struct ProcessedCommandRecord{
@@ -26,13 +26,13 @@ public:
     // Обычная вставка, без ON CONFLICT: повторный command_id должен
     // приводить к ошибке (нарушению уникальности первичного ключа), а не
     // молча перезаписывать строку — от дублей защищает кеш выше по стеку
-    // (задача 07/08), и если запрос всё же дошёл сюда с существующим
+    // и если запрос всё же дошёл сюда с существующим
     // идентификатором, значит кеш не сработал, и это должно быть видно.
     void save(PgConnection& connection, const std::string& commandId,
         const std::string& commandType, const std::string& status,
         const std::optional<std::string>& result);
 
-    // Пакетная запись (задача 12, REQ-OPT-03): многострочный INSERT на весь
+    // Пакетная запись (REQ-OPT-03): многострочный INSERT на весь
     // список записей пакета, за один или несколько execute() (см.
     // sql_batch_insert.hpp — список режется по числу строк, если иначе
     // запрос превысил бы протокольный предел параметров PostgreSQL), без
@@ -45,7 +45,7 @@ public:
     std::optional<ProcessedCommandRecord> findById(PgConnection& connection,
         const std::string& commandId);
 
-    // Прогрев кеша идемпотентности на старте (задача 08).
+    // Прогрев кеша идемпотентности на старте.
     std::vector<ProcessedCommandRecord> loadAll(PgConnection& connection);
 };
 

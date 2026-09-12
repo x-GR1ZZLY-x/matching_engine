@@ -32,7 +32,7 @@ long long parseLongLong(const std::string& text, const std::string& context){
     }
 }
 
-// Доменное правило из docs/plan.md (3a): у рыночной заявки (пустая цена)
+// Доменное правило: у рыночной заявки (пустая цена)
 // активных статусов быть не может — она попала бы в частичный индекс
 // idx_orders_active_sequence, loadActive() выбрала бы её и упала на пустой
 // цене при следующем старте приложения. Лучше отказать здесь, пока ошибку
@@ -79,7 +79,7 @@ void OrderRepository::save(PgConnection& connection, const OrderChange& change){
     std::vector<std::optional<std::string>> params = orderChangeToParams(change);
 
     // Выполняется на каждой изменяющей команде — подготовленный запрос
-    // (задача 12) экономит повторный разбор и планирование этого upsert'а.
+    // экономит повторный разбор и планирование этого upsert'а.
     connection.executePrepared(
         "order_repository_upsert",
         std::string("INSERT INTO orders ") + kOrderUpsertColumns +
@@ -101,8 +101,7 @@ void OrderRepository::saveBatch(PgConnection& connection, const std::vector<Orde
     // validateOrderChange проверяется здесь, для каждого исходного change —
     // до свёртки, а не после. Иначе промежуточный снимок одного order_id
     // (например, старый снимок MODIFY, вытесненный из latest новым) прошёл бы
-    // без проверки, хотя штатный save() проверяет каждое изменение (задача
-    // 12, правка 3).
+    // без проверки, хотя штатный save() проверяет каждое изменение.
     std::map<int, OrderChange> latest;
     for(const auto& change : changes){
         validateOrderChange(change);
@@ -119,7 +118,7 @@ void OrderRepository::saveBatch(PgConnection& connection, const std::vector<Orde
     // протокола и построение плейсхолдеров — общие для трёх репозиториев,
     // см. sql_batch_insert.hpp. Обычный execute() внутри, не
     // executePrepared() — форма запроса зависит от числа строк после
-    // свёртки (задача 12, "Доменные правила", п.6). Значения по-прежнему
+    // свёртки. Значения по-прежнему
     // идут отдельным массивом параметров, в текст запроса подставлены
     // только номера плейсхолдеров.
     executeBatchedInsert(connection, rows.size(), 7,

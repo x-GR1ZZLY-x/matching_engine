@@ -20,11 +20,11 @@ using namespace matching_engine;
 using matching_engine::test::g_lastConnectFailure;
 using matching_engine::test::tryConnect;
 
-// Задача 09: пять обязательных сценариев ТЗ (REQ-TEST-02..06) плюс
+// Пять обязательных сценариев ТЗ (REQ-TEST-02..06) плюс
 // интеграционные тесты, проверяющие связку MatchingEngine, репозиториев и
 // реальной PostgreSQL целиком (REQ-TEST-07).
 //
-// Изоляция (критерий 7 задачи 09): каждый тест здесь идёт через
+// Изоляция: каждый тест здесь идёт через
 // CommandProcessor::process(), а тот открывает и коммитит СВОЮ собственную
 // PgTransaction внутри PersistenceService — обернуть тест во внешнюю
 // незакоммиченную транзакцию, как делают unit-тесты репозиториев, здесь
@@ -206,8 +206,7 @@ TEST(IntegrationTest, RecoveryRestoresEquivalentOrderBook){
     EXPECT_EQ(beforeBuy100->getStatus(), OrderStatus::PartiallyFilled);
 
     // "Новый экземпляр" эмулируется новым CommandProcessor и явным вызовом
-    // recoverState (docs/tasks/task-09.md, "Доменные правила", п.3) —
-    // соединение переиспользуется, восстановление читает уже закоммиченное.
+    // recoverState — соединение переиспользуется, восстановление читает уже закоммиченное.
     CommandProcessor processor2;
     recoverState(conn, processor2);
 
@@ -240,8 +239,7 @@ TEST(IntegrationTest, RecoveryRestoresEquivalentOrderBook){
 //
 // Идентификаторы заявок намеренно НЕ совпадают с порядком их поступления
 // (первой приходит kFirstId, второй — kSecondId, третьей — kThirdId, и их
-// числовые значения идут не по возрастанию; docs/tasks/task-09.md,
-// "Доменные правила", п.5): если бы восстановление сортировало активные
+// числовые значения идут не по возрастанию): если бы восстановление сортировало активные
 // заявки по order_id, а не по sequence_number, тест бы это поймал, а тест,
 // где id совпадают с порядком поступления, — нет.
 //
@@ -483,7 +481,7 @@ TEST(IntegrationTest, ModifyResetsTimePriorityAcrossRestart){
     cleanupAllTables(conn);
 }
 
-// Ревью задачи 10, правка 3: критерии 3/4/6/7 (Application::run --replay
+// Application::run --replay
 // печатает сводку, некорректная строка не прерывает прогон, режим идёт
 // через тот же путь сохранения) до сих пор проверялись только вручную.
 // Единственный интеграционный тест на весь Application::run --replay:
