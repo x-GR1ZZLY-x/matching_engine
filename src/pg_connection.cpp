@@ -151,6 +151,10 @@ PgResult PgConnection::executePrepared(const std::string& name, const std::strin
     return PgResult(execResult);
 }
 
+bool PgConnection::isConnected() const noexcept{
+    return conn_ && PQstatus(conn_.get()) == CONNECTION_OK;
+}
+
 PgResult PgConnection::executeScript(const std::string& sql){
     if(!conn_){
         throw DatabaseError("PgConnection::executeScript called without an active connection "

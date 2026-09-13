@@ -12,7 +12,7 @@ namespace{
 // заявка записывается в processed_commands с command_type = 'ADD', а не
 // отдельным значением вроде MARKET_ADD. Это осознанно: различение через
 // dynamic_cast завело бы третью точку развилки «лимитная/рыночная», а
-// восстановление кеша в задаче 08 читает не command_type, а колонку result.
+// восстановление кеша читает не command_type, а колонку result.
 std::string commandTypeToString(CommandType type){
     switch(type){
         case CommandType::Add:    return "ADD";
@@ -53,8 +53,8 @@ nlohmann::json tradeToJson(const Trade& trade){
 
 // Обратная пара к orderChangeToJson/tradeToJson — тот же набор ключей,
 // прочитанный назад. Живёт рядом с прямым направлением в одном файле:
-// формат processed_commands.result описан здесь и только здесь (задача 08,
-// "Доменные правила", п.2), разъехавшиеся сериализация и разбор молча
+// формат processed_commands.result описан здесь и только здесь,
+// разъехавшиеся сериализация и разбор молча
 // сломали бы прогрев кеша после рестарта.
 OrderChange orderChangeFromJson(const nlohmann::json& j){
     OrderChange change;
@@ -99,7 +99,7 @@ std::string CommandProcessor::serializeResult(const ExecutionResult& result){
 // Разбор JSON, испорченный библиотекой (не найден ключ, не тот тип) —
 // nlohmann::json::exception, не входящий в иерархию MatchingEngineError;
 // без перехвата такое исключение долетело бы до std::terminate тем же
-// путём, от которого предостерегает критерий 5 задачи 07. side/status,
+// путём, которого нужно избегать. side/status,
 // нарушающие свой формат, дают OrderError — он уже MatchingEngineError,
 // оборачивать незачем.
 ExecutionResult CommandProcessor::parseResult(const std::string& json){
@@ -171,8 +171,7 @@ ExecutionResult CommandProcessor::processBatched(const Command& command, bool* s
     ProcessedCommandRecord record{commandId, commandTypeToString(command.type_),
         kAppliedStatus, serializeResult(result)};
 
-    // Кеш заполняется сразу, а не после flushBatch (docs/tasks/task-12.md,
-    // "Доменные правила", п.3): иначе повтор command_id внутри одного
+    // Кеш заполняется сразу, а не после flushBatch: иначе повтор command_id внутри одного
     // пакета не был бы опознан и команда выполнилась бы дважды.
     cache_.put(commandId, result);
 
@@ -210,7 +209,7 @@ void CommandProcessor::warmCache(const std::string& commandId,
     const std::optional<std::string>& resultJson){
     if(!resultJson){
         // Колонка nullable — NULL сюда попадает не от нормального процесса
-        // задачи 08, а от внешнего вмешательства (ручная правка, сторонний
+        // сохранения результата, а от внешнего вмешательства (ручная правка, сторонний
         // инструмент). Молча подставлять пустой результат не запрещено, но
         // след в логе обязателен: иначе повтор этой команды после рестарта
         // тихо ответит "сделок нет" вместо прошлого результата.

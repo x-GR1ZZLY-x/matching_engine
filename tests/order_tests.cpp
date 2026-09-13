@@ -423,3 +423,70 @@ TEST(MarketOrderTest, RejectedOrderDoesNotAdvanceSequence)
     MarketOrder order(2, Side::Buy, 10);
     EXPECT_EQ(order.getSequenceNumber(), 100);
 }
+
+// ─── Восстанавливающий конструктор Order: непроверенные ранее условия ────────
+
+TEST(OrderTest, RestoringConstructorRejectsNonPositivePrice)
+{
+    // Отдельная проверка price<=0 в 7-аргументном конструкторе — до сих пор
+    // проверялась только в основном конструкторе.
+    EXPECT_THROW(Order(1, Side::Buy, 0, 6, 10, 5, OrderStatus::PartiallyFilled), OrderError);
+}
+
+TEST(OrderTest, RestoringConstructorRejectsNonPositiveInitialQuantity)
+{
+    EXPECT_THROW(Order(1, Side::Buy, 100, 0, 0, 5, OrderStatus::Cancelled), OrderError);
+}
+
+TEST(OrderTest, RestoringConstructorRejectsNegativeRemainingQuantity)
+{
+    // Левый операнд условия "quantity < 0 || quantity > initialQuantity"
+    EXPECT_THROW(Order(1, Side::Buy, 100, -1, 10, 5, OrderStatus::Open), OrderError);
+}
+
+TEST(OrderTest, RestoringConstructorRejectsRemainingExceedingInitial)
+{
+    // Правый операнд того же условия — левый должен быть ложным
+    EXPECT_THROW(Order(1, Side::Buy, 100, 15, 10, 5, OrderStatus::Open), OrderError);
+}
+
+TEST(OrderTest, FillNegativeQuantityThrows)
+{
+    Order order(1, Side::Buy, 100, 5);
+    EXPECT_THROW(order.fill(-1), OrderError);
+}
+
+// ─── Восстанавливающий конструктор MarketOrder: те же непроверенные условия ──
+
+TEST(MarketOrderTest, RestoringConstructorRejectsNonPositiveInitialQuantity)
+{
+    EXPECT_THROW(MarketOrder(1, Side::Buy, 0, 0, 5, OrderStatus::Cancelled), OrderError);
+}
+
+TEST(MarketOrderTest, RestoringConstructorRejectsNegativeRemainingQuantity)
+{
+    EXPECT_THROW(MarketOrder(1, Side::Buy, -1, 10, 5, OrderStatus::Open), OrderError);
+}
+
+TEST(MarketOrderTest, RestoringConstructorRejectsRemainingExceedingInitial)
+{
+    EXPECT_THROW(MarketOrder(1, Side::Buy, 15, 10, 5, OrderStatus::Open), OrderError);
+}
+
+TEST(MarketOrderTest, FillZeroThrows)
+{
+    MarketOrder order(1, Side::Buy, 5);
+    EXPECT_THROW(order.fill(0), OrderError);
+}
+
+TEST(MarketOrderTest, FillNegativeQuantityThrows)
+{
+    MarketOrder order(1, Side::Buy, 5);
+    EXPECT_THROW(order.fill(-1), OrderError);
+}
+
+TEST(MarketOrderTest, FillMoreThanQuantityThrows)
+{
+    MarketOrder order(1, Side::Buy, 5);
+    EXPECT_THROW(order.fill(10), OrderError);
+}

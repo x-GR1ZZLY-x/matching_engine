@@ -31,7 +31,7 @@ TEST(ApplicationParseArgsTest, DefaultConfigPathWhenNoConfigOption){
         error);
 
     EXPECT_TRUE(ok);
-    EXPECT_EQ(configPath, "config/database.json");
+    EXPECT_EQ(configPath, "config/config.json");
     EXPECT_EQ(jsonArg, "{\"commands\":[]}");
     EXPECT_TRUE(replayPath.empty());
     EXPECT_FALSE(batch);
@@ -71,9 +71,8 @@ TEST(ApplicationParseArgsTest, ConfigOptionWithoutValueFails){
     EXPECT_FALSE(error.empty());
 }
 
-// --replay появился в задаче 10; до неё этот же вызов использовался как
-// заглушка для проверки "неизвестный ключ отвергается" (см.
-// docs/progress.md). Теперь --replay — известный ключ с собственными
+// --replay появился позже; до этого этот же вызов использовался как
+// заглушка для проверки "неизвестный ключ отвергается". Теперь --replay — известный ключ с собственными
 // тестами ниже, а неизвестный ключ проверяется на другом имени.
 TEST(ApplicationParseArgsTest, UnknownOptionFails){
     std::string configPath, jsonArg, replayPath, error;
@@ -142,9 +141,9 @@ TEST(ApplicationParseArgsTest, ReplayTogetherWithConfigOptionParsesBoth){
     EXPECT_EQ(replayPath, "workload.jsonl");
 }
 
-// --batch появился в задаче 12 (вторая часть, пакетная запись при
+// --batch появился позже (пакетная запись при
 // воспроизведении нагрузки) — те же три сценария, что проверялись для
-// --replay в задаче 10: принят вместе с --replay, без значения (флаг), и в
+// --replay: принят вместе с --replay, без значения (флаг), и в
 // недопустимом сочетании (без --replay).
 TEST(ApplicationParseArgsTest, BatchOptionWithReplaySucceeds){
     std::string configPath, jsonArg, replayPath, error;
@@ -218,4 +217,21 @@ TEST(ApplicationParseArgsTest, BatchOptionWithPositionalJsonFails){
 
     EXPECT_FALSE(ok);
     EXPECT_FALSE(error.empty());
+}
+
+// Ни --replay, ни позиционного JSON-аргумента вовсе — последняя ветка
+// parseArgs (`if(!hasReplay && !hasJsonArg)`), до этой правки не
+// покрытая ни одним тестом. errorMessage в этом случае — не произвольная
+// строка, а ровно usage-текст: run() различает это сообщение от прочих
+// ошибок разбора, чтобы решить, печатать его как ERROR: или как обычный
+// usage без этого префикса (см. ApplicationRunWithNoArgsPrintsUsage в
+// integration_tests.cpp).
+TEST(ApplicationParseArgsTest, NoReplayAndNoPositionalArgFailsWithUsage){
+    std::string configPath, jsonArg, replayPath, error;
+    bool batch = false;
+
+    const bool ok = callParseArgs({}, configPath, jsonArg, replayPath, batch, error);
+
+    EXPECT_FALSE(ok);
+    EXPECT_NE(error.find("Usage:"), std::string::npos);
 }

@@ -242,3 +242,29 @@ TEST(OrderBookTest, RestorePreservesOrderOfSequenceNumbers)
     ASSERT_NE(best, nullptr);
     EXPECT_EQ(best->getId(), 10);
 }
+
+// ─── removeFromLevels: удаление одной из нескольких заявок на уровне ─────────
+// (проверяет ветку deq.empty() == false — уровень не должен удаляться, пока
+// на нём остаются другие заявки; существующие тесты проверяли только случай,
+// когда удаляемая заявка была единственной на своём уровне цены).
+
+TEST(OrderBookTest, RemovingOneOfTwoOrdersAtSamePriceKeepsLevel)
+{
+    OrderBook book;
+    book.addOrder(makeBuy(1, 100, 5));
+    book.addOrder(makeBuy(2, 100, 3));
+
+    book.removeOrder(1);
+
+    // Уровень цены 100 не исчез — вторая заявка всё ещё в книге и видна
+    // и через findOrder, и через bestBuy/buyOrders.
+    EXPECT_NE(book.findOrder(2), nullptr);
+
+    auto best = book.bestBuy();
+    ASSERT_NE(best, nullptr);
+    EXPECT_EQ(best->getId(), 2);
+
+    auto orders = book.buyOrders();
+    ASSERT_EQ(orders.size(), 1u);
+    EXPECT_EQ(orders[0]->getId(), 2);
+}

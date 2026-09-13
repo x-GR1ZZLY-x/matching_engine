@@ -44,6 +44,11 @@ void ReportPrinter::printUsage(const std::string& usage) const{
     std::cout.flush();
 }
 
+void ReportPrinter::printResponse(const std::string& response) const{
+    std::cout << response << "\n";
+    std::cout.flush();
+}
+
 void ReportPrinter::printReplaySummary(long long processedCommands, long long trades,
     long long duplicates, long long skippedLines, std::chrono::milliseconds elapsed) const{
     std::cout << "REPLAY SUMMARY\n"

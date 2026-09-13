@@ -588,3 +588,79 @@ TEST(MatchingEngineTest, RestoredOrdersMatchedInSequenceOrder) {
     EXPECT_EQ(trades[1].getBuyOrderId(), 20);
     EXPECT_EQ(trades[2].getBuyOrderId(), 30);
 }
+
+// ─── PRINT: ветка, отдельная от Add/Cancel/Modify ────────────────────────────
+
+TEST(MatchingEngineTest, PrintCommandProducesEmptyResultAndDoesNotTouchBook) {
+    MatchingEngine engine;
+    engine.process(makeAdd(1, Side::Buy, 100, 10));
+
+    PrintCommand printCmd;
+    auto result = engine.process(printCmd);
+
+    EXPECT_TRUE(result.trades.empty());
+    EXPECT_TRUE(result.orderChanges.empty());
+    // PRINT не должен ни менять книгу, ни создавать сделки
+    EXPECT_TRUE(engine.trades().empty());
+    EXPECT_NE(engine.orderBook().findOrder(1), nullptr);
+}
+
+// ─── MARKET ADD: дубликат id — своя проверка, отдельная от processAdd ───────
+
+TEST(MatchingEngineTest, MarketAddDuplicateOrderIdThrows) {
+    MatchingEngine engine;
+    engine.process(makeAdd(1, Side::Buy, 100, 10));
+
+    EXPECT_THROW(engine.process(marketBuy(1, Side::Sell, 5)), DuplicateOrderError);
+}
+
+// ─── MARKET SELL без покупателей — симметричный случай к MarketBuyNoSellers ──
+
+TEST(MatchingEngineTest, MarketSellNoBuyers) {
+    MatchingEngine engine;
+
+    MarketAddCommand marketSell(1, Side::Sell, 10);
+    engine.process(marketSell);
+
+    EXPECT_TRUE(engine.trades().empty());
+    EXPECT_EQ(engine.orderBook().findOrder(1), nullptr);
+}
+
+// ─── Рыночная заявка меньше книжной — книжная заявка остаётся в книге частично
+// исполненной (else-ветка executeMarketTrade, до сих пор не пройденная) ─────
+
+TEST(MatchingEngineTest, MarketBuyPartiallyFillsBookOrder) {
+    MatchingEngine engine;
+    engine.process(makeAdd(1, Side::Sell, 100, 10));
+
+    MarketAddCommand marketBuySmall(2, Side::Buy, 4);
+    engine.process(marketBuySmall);
+
+    ASSERT_EQ(engine.trades().size(), 1u);
+    EXPECT_EQ(engine.trades()[0].getQuantity(), 4);
+
+    // Книжная заявка исполнена частично и осталась в книге, а не удалена
+    auto remaining = engine.orderBook().findOrder(1);
+    ASSERT_NE(remaining, nullptr);
+    EXPECT_EQ(remaining->getQuantity(), 6);
+}
+
+// ─── MODIFY, приводящий к полному исполнению — модифицированная заявка
+// не должна попасть обратно в книгу (ветка !modified->isFilled() == false) ──
+
+TEST(MatchingEngineTest, ModifyFullMatchDoesNotReturnOrderToBook) {
+    MatchingEngine engine;
+    engine.process(makeAdd(1, Side::Sell, 105, 10));
+    engine.process(makeAdd(2, Side::Buy, 100, 5));
+
+    EXPECT_TRUE(engine.trades().empty());
+
+    ModifyCommand modCmd(2, 105, 10);
+    engine.process(modCmd);
+
+    ASSERT_EQ(engine.trades().size(), 1u);
+    EXPECT_EQ(engine.trades()[0].getQuantity(), 10);
+
+    EXPECT_EQ(engine.orderBook().findOrder(1), nullptr);
+    EXPECT_EQ(engine.orderBook().findOrder(2), nullptr);
+}

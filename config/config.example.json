@@ -1,0 +1,14 @@
+{
+    "server": {
+        "address": "0.0.0.0",
+        "port": 9000,
+        "max_message_size": 1048576
+    },
+    "database": {
+        "host": "localhost",
+        "port": 5432,
+        "name": "example_db",
+        "user": "matching_engine_user",
+        "schema_dir": "database"
+    }
+}

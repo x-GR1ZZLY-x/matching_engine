@@ -32,7 +32,7 @@ OrderChange makeChange(int id, Side side, std::optional<int> price,
 
 }
 
-// Критерии 7 и 10: пустая цена рыночной заявки должна читаться как NULL, а
+// Пустая цена рыночной заявки должна читаться как NULL, а
 // не как пустая строка — различить их можно только через isNull().
 TEST(OrderRepositoryTest, MarketOrderPriceIsStoredAndReadAsNullNotEmptyString){
     auto connOpt = tryConnect();
@@ -81,7 +81,7 @@ TEST(OrderRepositoryTest, LimitOrderPriceIsNotNull){
     EXPECT_EQ(result.getValue(0, 0), "150");
 }
 
-// Критерий 5: загрузка активных заявок возвращает их строго в порядке
+// Загрузка активных заявок возвращает их строго в порядке
 // возрастания номера последовательности — вставлены в обратном порядке.
 TEST(OrderRepositoryTest, LoadActiveReturnsOrdersOrderedBySequenceNumber){
     auto connOpt = tryConnect();
@@ -114,7 +114,7 @@ TEST(OrderRepositoryTest, LoadActiveReturnsOrdersOrderedBySequenceNumber){
     EXPECT_EQ(testOrders[2]->getId(), 900000203);
 }
 
-// Критерий 6: загруженная заявка сохраняет записанные номер
+// Загруженная заявка сохраняет записанные номер
 // последовательности, исходное количество и статус — они не пересоздаются.
 TEST(OrderRepositoryTest, LoadActivePreservesSequenceNumberInitialQuantityAndStatus){
     auto connOpt = tryConnect();
@@ -163,7 +163,7 @@ TEST(OrderRepositoryTest, LoadActiveExcludesFilledAndCancelledOrders){
     }
 }
 
-// Пункт 3a задачи 06: у рыночной заявки (пустая цена) активных статусов
+// У рыночной заявки (пустая цена) активных статусов
 // быть не может — save() должен отказать fail-fast, а не сохранить строку,
 // на которой позже упадёт loadActive() при рестарте.
 TEST(OrderRepositoryTest, SaveRejectsActiveMarketOrder){
@@ -181,7 +181,7 @@ TEST(OrderRepositoryTest, SaveRejectsActiveMarketOrder){
         OrderStatus::PartiallyFilled, 900000702)), MatchingEngineError);
 }
 
-// Задача 08, критерий 4: maxSequenceNumber() обязан видеть исполненную
+// maxSequenceNumber() обязан видеть исполненную
 // заявку с номером выше, чем у любой активной, — loadActive() её не вернёт
 // (фильтр по статусу), поэтому взять максимум только по её результату было
 // бы ровно той ошибкой, о которой предупреждает критерий.
@@ -205,4 +205,126 @@ TEST(OrderRepositoryTest, MaxSequenceNumberSeesFilledOrderAboveAnyActiveOne){
     // только на активные заявки, вернулось бы меньшее значение и это всё
     // равно упало бы.
     EXPECT_GE(repo.maxSequenceNumber(conn), 900000999);
+}
+
+// saveBatch() — пакетная запись (REQ-OPT-03), до сих пор не покрытая ни
+// одним тестом: до этой правки executeBatchedInsert (sql_batch_insert.hpp)
+// не выполнялся вообще ни разу за весь прогон тестов. Три изменения на трёх
+// разных order_id — обычный путь без свёртки.
+TEST(OrderRepositoryTest, SaveBatchPersistsAllRows){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    auto& conn = *connOpt;
+    PgTransaction tx(conn);
+
+    OrderRepository repo;
+    std::vector<OrderChange> changes{
+        makeChange(900001001, Side::Buy, 100, 10, 10, OrderStatus::Open, 900001010),
+        makeChange(900001002, Side::Sell, 105, 5, 5, OrderStatus::Open, 900001020),
+        makeChange(900001003, Side::Buy, 99, 7, 2, OrderStatus::PartiallyFilled, 900001030),
+    };
+
+    repo.saveBatch(conn, changes);
+
+    for(const auto& change : changes){
+        PgResult row = conn.execute(
+            "SELECT remaining_quantity FROM orders WHERE order_id = $1",
+            {std::optional<std::string>(std::to_string(change.id))});
+        ASSERT_EQ(row.rowCount(), 1);
+        EXPECT_EQ(row.getValue(0, 0), std::to_string(change.remainingQuantity));
+    }
+}
+
+// Пустой список — no-op по докстроке в заголовке: ни один execute() не
+// выполняется, вызов не должен бросать и не должен ничего менять в БД.
+TEST(OrderRepositoryTest, SaveBatchWithEmptyListIsNoOp){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    auto& conn = *connOpt;
+    PgTransaction tx(conn);
+
+    OrderRepository repo;
+    EXPECT_NO_THROW(repo.saveBatch(conn, {}));
+}
+
+// Два снимка одного order_id в одном пакете (типичный случай MODIFY —
+// см. докстроку saveBatch): побеждает последняя запись в векторе, ровно
+// как при последовательных вызовах save().
+TEST(OrderRepositoryTest, SaveBatchWithDuplicateOrderIdKeepsLastEntry){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    auto& conn = *connOpt;
+    PgTransaction tx(conn);
+
+    OrderRepository repo;
+    std::vector<OrderChange> changes{
+        makeChange(900001101, Side::Buy, 100, 10, 10, OrderStatus::Open, 900001110),
+        makeChange(900001101, Side::Buy, 100, 10, 4, OrderStatus::PartiallyFilled, 900001111),
+    };
+
+    repo.saveBatch(conn, changes);
+
+    PgResult row = conn.execute(
+        "SELECT remaining_quantity, status FROM orders WHERE order_id = $1",
+        {std::optional<std::string>("900001101")});
+    ASSERT_EQ(row.rowCount(), 1);
+    EXPECT_EQ(row.getValue(0, 0), "4");
+    EXPECT_EQ(row.getValue(0, 1), "PARTIALLY_FILLED");
+}
+
+// Тот же fail-fast, что и у save() (SaveRejectsActiveMarketOrder выше), но
+// на пути saveBatch(): validateOrderChange() вызывается для каждой исходной
+// записи до свёртки по order_id.
+TEST(OrderRepositoryTest, SaveBatchRejectsActiveMarketOrder){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    auto& conn = *connOpt;
+    PgTransaction tx(conn);
+
+    OrderRepository repo;
+    std::vector<OrderChange> changes{
+        makeChange(900001201, Side::Buy, std::nullopt, 10, 10, OrderStatus::Open, 900001210),
+    };
+
+    EXPECT_THROW(repo.saveBatch(conn, changes), MatchingEngineError);
+}
+
+// loadActive() оборачивает OrderError восстанавливающего конструктора Order в
+// DatabaseError с указанием order_id — до этой правки ни один тест не
+// доводил строку orders до состояния, которое проходит CHECK-ограничения
+// схемы (валидные side/status), но нарушает доменный инвариант Order
+// (remaining_quantity не может превышать initial_quantity). Единственный
+// способ получить такую строку — вставка в обход OrderRepository::save(),
+// эмулирующая испорченные данные, оставленные внешним вмешательством
+// (см. аналогичный приём в IntegrationTest.
+// ApplicationRunWithNullPriceOnActiveOrderReturnsRecoveryErrorExitCode).
+TEST(OrderRepositoryTest, LoadActiveThrowsOnCorruptedRemainingQuantity){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    auto& conn = *connOpt;
+    PgTransaction tx(conn);
+
+    constexpr int kBrokenOrderId = 900002001;
+    // remaining_quantity (10) > initial_quantity (5): проходит CHECK на
+    // side/status, но восстанавливающий конструктор Order бросит OrderError
+    // ("Remaining quantity out of range").
+    conn.execute(
+        "INSERT INTO orders (order_id, side, price, initial_quantity, "
+        "remaining_quantity, status, sequence_number) "
+        "VALUES ($1, 'BUY', 100, 5, 10, 'OPEN', $2)",
+        {std::optional<std::string>(std::to_string(kBrokenOrderId)),
+            std::optional<std::string>(std::to_string(kBrokenOrderId))});
+
+    OrderRepository repo;
+    EXPECT_THROW(repo.loadActive(conn), DatabaseError);
 }

@@ -28,7 +28,7 @@ void CommandRepository::save(PgConnection& connection, const std::string& comman
     std::vector<std::optional<std::string>> params{commandId, commandType, status, result};
 
     // Выполняется на каждой изменяющей команде — подготовленный запрос
-    // (задача 12) экономит повторный разбор и планирование этой вставки.
+    // экономит повторный разбор и планирование этой вставки.
     connection.executePrepared(
         "command_repository_insert",
         "INSERT INTO processed_commands (command_id, command_type, status, result) "

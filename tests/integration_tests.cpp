@@ -1,13 +1,16 @@
 #include<gtest/gtest.h>
 #include<filesystem>
 #include<fstream>
+#include<functional>
 #include<memory>
+#include<nlohmann/json.hpp>
 #include<optional>
 #include<string>
 #include<vector>
 #include"application.hpp"
 #include"command.hpp"
 #include"command_processor.hpp"
+#include"exceptions.hpp"
 #include"execution_result.hpp"
 #include"order.hpp"
 #include"pg_connection.hpp"
@@ -20,11 +23,11 @@ using namespace matching_engine;
 using matching_engine::test::g_lastConnectFailure;
 using matching_engine::test::tryConnect;
 
-// Задача 09: пять обязательных сценариев ТЗ (REQ-TEST-02..06) плюс
+// Пять обязательных сценариев ТЗ (REQ-TEST-02..06) плюс
 // интеграционные тесты, проверяющие связку MatchingEngine, репозиториев и
 // реальной PostgreSQL целиком (REQ-TEST-07).
 //
-// Изоляция (критерий 7 задачи 09): каждый тест здесь идёт через
+// Изоляция: каждый тест здесь идёт через
 // CommandProcessor::process(), а тот открывает и коммитит СВОЮ собственную
 // PgTransaction внутри PersistenceService — обернуть тест во внешнюю
 // незакоммиченную транзакцию, как делают unit-тесты репозиториев, здесь
@@ -51,6 +54,61 @@ void cleanupAllTables(PgConnection& connection){
     connection.execute("DELETE FROM trades");
     connection.execute("DELETE FROM orders");
     connection.execute("DELETE FROM processed_commands");
+}
+
+// Запускает Application::run(argv) с рабочим каталогом процесса,
+// временно переставленным в корень репозитория, — так же, как это уже
+// делает ApplicationRunReplaySkipsBadLineAndPersistsValidOnes ниже:
+// applySchema() внутри Application::run получает schemaDir из конфигурации
+// как относительный или абсолютный путь, а тесты типовых сценариев
+// используют тот же конфиг, что и приложение целиком (config/config.json),
+// где schema_dir прописан относительным ("database"). Возврат к прежнему
+// каталогу гарантирован RAII-объектом ниже даже при исключении.
+class ScopedWorkingDirectory{
+public:
+    ScopedWorkingDirectory() : previous_(std::filesystem::current_path()){
+        std::filesystem::current_path(MATCHING_ENGINE_SOURCE_DIR);
+    }
+    ~ScopedWorkingDirectory(){
+        std::filesystem::current_path(previous_);
+    }
+    ScopedWorkingDirectory(const ScopedWorkingDirectory&) = delete;
+    ScopedWorkingDirectory& operator=(const ScopedWorkingDirectory&) = delete;
+
+private:
+    std::filesystem::path previous_;
+};
+
+int runApplication(std::vector<std::string> args){
+    ScopedWorkingDirectory cwd;
+
+    std::vector<char*> argv{const_cast<char*>("matching_engine")};
+    for(auto& arg : args){
+        argv.push_back(const_cast<char*>(arg.c_str()));
+    }
+
+    Application app;
+    return app.run(static_cast<int>(argv.size()), argv.data());
+}
+
+// Копирует реальный config/config.json, подменяя одно поле (заданное
+// патчем), и возвращает путь к временному файлу — для сценариев,
+// требующих отличную от рабочей конфигурацию (битый schema_dir,
+// недоступный порт БД), но не желающих задавать все поля с нуля и тем
+// самым расходиться с реальными значениями хоста/имени БД/пользователя.
+std::string writePatchedConfig(const std::string& suffix,
+    const std::function<void(nlohmann::json&)>& patch){
+
+    std::ifstream real(matching_engine::test::configPath());
+    nlohmann::json root;
+    real >> root;
+    patch(root);
+
+    const std::filesystem::path path = std::filesystem::temp_directory_path() /
+        ("matching_engine_config_" + suffix + ".json");
+    std::ofstream out(path);
+    out << root.dump();
+    return path.string();
 }
 
 }
@@ -206,8 +264,7 @@ TEST(IntegrationTest, RecoveryRestoresEquivalentOrderBook){
     EXPECT_EQ(beforeBuy100->getStatus(), OrderStatus::PartiallyFilled);
 
     // "Новый экземпляр" эмулируется новым CommandProcessor и явным вызовом
-    // recoverState (docs/tasks/task-09.md, "Доменные правила", п.3) —
-    // соединение переиспользуется, восстановление читает уже закоммиченное.
+    // recoverState — соединение переиспользуется, восстановление читает уже закоммиченное.
     CommandProcessor processor2;
     recoverState(conn, processor2);
 
@@ -240,8 +297,7 @@ TEST(IntegrationTest, RecoveryRestoresEquivalentOrderBook){
 //
 // Идентификаторы заявок намеренно НЕ совпадают с порядком их поступления
 // (первой приходит kFirstId, второй — kSecondId, третьей — kThirdId, и их
-// числовые значения идут не по возрастанию; docs/tasks/task-09.md,
-// "Доменные правила", п.5): если бы восстановление сортировало активные
+// числовые значения идут не по возрастанию): если бы восстановление сортировало активные
 // заявки по order_id, а не по sequence_number, тест бы это поймал, а тест,
 // где id совпадают с порядком поступления, — нет.
 //
@@ -483,7 +539,7 @@ TEST(IntegrationTest, ModifyResetsTimePriorityAcrossRestart){
     cleanupAllTables(conn);
 }
 
-// Ревью задачи 10, правка 3: критерии 3/4/6/7 (Application::run --replay
+// Application::run --replay
 // печатает сводку, некорректная строка не прерывает прогон, режим идёт
 // через тот же путь сохранения) до сих пор проверялись только вручную.
 // Единственный интеграционный тест на весь Application::run --replay:
@@ -554,4 +610,489 @@ TEST(IntegrationTest, ApplicationRunReplaySkipsBadLineAndPersistsValidOnes){
     EXPECT_EQ(count.getValue(0, 0), "2");
 
     cleanupAllTables(conn);
+}
+
+// Application::run: файл конфигурации не найден — ConfigError перехвачен до
+// всякого обращения к БД (REQ-RAII-09 не затрагивается: соединение ещё не
+// открыто). Не требует БД вовсе.
+TEST(IntegrationTest, ApplicationRunWithMissingConfigFileReturnsErrorExitCode){
+    testing::internal::CaptureStderr();
+    const int exitCode = runApplication({"--config", "/nonexistent/matching_engine_config.json",
+        "{\"commands\":[]}"});
+    const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+    EXPECT_EQ(exitCode, 1);
+    EXPECT_NE(stderrOutput.find("ERROR:"), std::string::npos);
+}
+
+// Application::run: конфигурация читается, но порт БД недоступен —
+// describeConnectionFailure() формирует сообщение, PgConnection бросает
+// MatchingEngineError до applySchema/recoverState. Порт 1 выбран как
+// заведомо не слушающий ни один сервер PostgreSQL в тестовом окружении.
+TEST(IntegrationTest, ApplicationRunWithUnreachableDatabasePortReturnsErrorExitCode){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+
+    const std::string configPath = writePatchedConfig("bad_port",
+        [](nlohmann::json& root){ root["database"]["port"] = 1; });
+
+    testing::internal::CaptureStderr();
+    const int exitCode = runApplication({"--config", configPath, "{\"commands\":[]}"});
+    const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+    EXPECT_EQ(exitCode, 1);
+    EXPECT_NE(stderrOutput.find("Cannot connect to the database"), std::string::npos);
+
+    std::filesystem::remove(configPath);
+}
+
+// Application::run: соединение открыто, но schema_dir указывает на
+// несуществующий каталог — describeSchemaFailure() перехватывает
+// MatchingEngineError из applySchema до recoverState.
+TEST(IntegrationTest, ApplicationRunWithBadSchemaDirReturnsErrorExitCode){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+
+    const std::string configPath = writePatchedConfig("bad_schema",
+        [](nlohmann::json& root){
+            root["database"]["schema_dir"] = "/nonexistent/matching_engine_schema_dir";
+        });
+
+    testing::internal::CaptureStderr();
+    const int exitCode = runApplication({"--config", configPath, "{\"commands\":[]}"});
+    const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+    EXPECT_EQ(exitCode, 1);
+    EXPECT_NE(stderrOutput.find("Failed to apply the database schema"), std::string::npos);
+
+    std::filesystem::remove(configPath);
+}
+
+// Application::run: полный обычный старт (конфиг, соединение, схема,
+// восстановление) доходит до разбора позиционного JSON-аргумента, а тот
+// синтаксически невалиден.
+TEST(IntegrationTest, ApplicationRunWithInvalidJsonArgReturnsErrorExitCode){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+
+    testing::internal::CaptureStderr();
+    const int exitCode = runApplication({"{not valid json"});
+    const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+    EXPECT_EQ(exitCode, 1);
+    EXPECT_NE(stderrOutput.find("Invalid JSON"), std::string::npos);
+}
+
+// Позиционный аргумент — синтаксически валидный JSON, но не объект с полем
+// "commands" (здесь — массив верхнего уровня). Эта проверка стоит раньше
+// входа в цикл именно для того, чтобы не поймать вместо этого
+// нативное исключение nlohmann::json::type_error.
+TEST(IntegrationTest, ApplicationRunWithTopLevelJsonArrayReturnsErrorExitCode){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+
+    testing::internal::CaptureStderr();
+    const int exitCode = runApplication({"[]"});
+    const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+    EXPECT_EQ(exitCode, 1);
+    EXPECT_NE(stderrOutput.find("must be an object"), std::string::npos);
+}
+
+// PRINT в позиционном режиме (не --replay): processCommand() возвращает
+// Status::Printed, run() не прерывается и печатает книгу заявок в stdout.
+TEST(IntegrationTest, ApplicationRunWithPrintCommandPrintsOrderBookAndSucceeds){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+
+    testing::internal::CaptureStdout();
+    const int exitCode = runApplication({"{\"commands\":[{\"type\":\"PRINT\"}]}"});
+    const std::string stdoutOutput = testing::internal::GetCapturedStdout();
+
+    EXPECT_EQ(exitCode, 0);
+    EXPECT_NE(stdoutOutput.find("ORDER BOOK"), std::string::npos);
+}
+
+// Ошибочная команда (отсутствует обязательный command_id) не прерывает
+// обработку остальных команд массива ("Обработка ошибок" в CLAUDE.md) —
+// после неё валидная ADD всё равно применяется и сохраняется.
+TEST(IntegrationTest, ApplicationRunContinuesAfterFailingCommandInArray){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    auto& conn = *connOpt;
+
+    constexpr int kOrderId = 901900001;
+    conn.execute("DELETE FROM orders WHERE order_id = $1",
+        {std::optional<std::string>(std::to_string(kOrderId))});
+    conn.execute("DELETE FROM processed_commands WHERE command_id = $1",
+        {std::optional<std::string>("run-continues-after-failure")});
+
+    const std::string commands = "{\"commands\":["
+        "{\"type\":\"ADD\",\"id\":901900099,\"side\":\"BUY\",\"price\":100,\"quantity\":1},"
+        "{\"type\":\"ADD\",\"id\":" + std::to_string(kOrderId) + ",\"side\":\"BUY\",\"price\":100,"
+        "\"quantity\":5,\"command_id\":\"run-continues-after-failure\"}]}";
+
+    testing::internal::CaptureStderr();
+    const int exitCode = runApplication({commands});
+    const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+    EXPECT_EQ(exitCode, 0);
+    EXPECT_NE(stderrOutput.find("ERROR:"), std::string::npos);
+
+    PgResult row = conn.execute("SELECT remaining_quantity FROM orders WHERE order_id = $1",
+        {std::optional<std::string>(std::to_string(kOrderId))});
+    ASSERT_EQ(row.rowCount(), 1);
+    EXPECT_EQ(row.getValue(0, 0), "5");
+
+    conn.execute("DELETE FROM orders WHERE order_id = $1",
+        {std::optional<std::string>(std::to_string(kOrderId))});
+    conn.execute("DELETE FROM processed_commands WHERE command_id = $1",
+        {std::optional<std::string>("run-continues-after-failure")});
+}
+
+// --replay с несуществующим файлом: runReplay() возвращает false до всякого
+// чтения строк, run() транслирует это в код возврата 1.
+TEST(IntegrationTest, ApplicationRunReplayWithMissingFileReturnsErrorExitCode){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+
+    testing::internal::CaptureStderr();
+    const int exitCode = runApplication({"--replay", "/nonexistent/matching_engine_replay.jsonl"});
+    const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+    EXPECT_EQ(exitCode, 1);
+    EXPECT_NE(stderrOutput.find("Cannot open replay file"), std::string::npos);
+}
+
+// --replay --batch: команды копятся в буфере CommandProcessor и сбрасываются
+// один раз по достижении конца файла (ветка "if(batch){ flushBatch }" после
+// цикла в runReplay) — до этой правки не проверялось ни разу.
+TEST(IntegrationTest, ApplicationRunReplayWithBatchFlagPersistsViaFlushBatch){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    auto& conn = *connOpt;
+
+    constexpr int kSellId = 902000001;
+    constexpr int kBuyId = 902000002;
+    conn.execute("DELETE FROM trades WHERE buy_order_id = $1 OR sell_order_id = $1",
+        {std::optional<std::string>(std::to_string(kBuyId))});
+    conn.execute("DELETE FROM orders WHERE order_id = $1 OR order_id = $2",
+        {std::optional<std::string>(std::to_string(kSellId)),
+            std::optional<std::string>(std::to_string(kBuyId))});
+    conn.execute("DELETE FROM processed_commands WHERE command_id = $1 OR command_id = $2",
+        {std::optional<std::string>("replay-batch-sell"),
+            std::optional<std::string>("replay-batch-buy")});
+
+    const std::filesystem::path replayPath = std::filesystem::temp_directory_path() /
+        "matching_engine_replay_batch_test.jsonl";
+    {
+        std::ofstream out(replayPath);
+        out << "{\"type\":\"ADD\",\"id\":" << kSellId
+            << ",\"side\":\"SELL\",\"price\":100,\"quantity\":10,"
+               "\"command_id\":\"replay-batch-sell\"}\n";
+        out << "{\"type\":\"ADD\",\"id\":" << kBuyId
+            << ",\"side\":\"BUY\",\"price\":100,\"quantity\":4,"
+               "\"command_id\":\"replay-batch-buy\"}\n";
+    }
+
+    testing::internal::CaptureStdout();
+    const int exitCode = runApplication({"--replay", replayPath.string(), "--batch"});
+    const std::string stdoutOutput = testing::internal::GetCapturedStdout();
+    std::filesystem::remove(replayPath);
+
+    EXPECT_EQ(exitCode, 0);
+    EXPECT_NE(stdoutOutput.find("processed=2"), std::string::npos);
+    EXPECT_NE(stdoutOutput.find("trades=1"), std::string::npos);
+
+    PgResult count = conn.execute(
+        "SELECT COUNT(*) FROM processed_commands WHERE command_id = $1 OR command_id = $2",
+        {std::optional<std::string>("replay-batch-sell"),
+            std::optional<std::string>("replay-batch-buy")});
+    ASSERT_EQ(count.rowCount(), 1);
+    EXPECT_EQ(count.getValue(0, 0), "2");
+
+    conn.execute("DELETE FROM trades WHERE buy_order_id = $1 OR sell_order_id = $1",
+        {std::optional<std::string>(std::to_string(kBuyId))});
+    conn.execute("DELETE FROM orders WHERE order_id = $1 OR order_id = $2",
+        {std::optional<std::string>(std::to_string(kSellId)),
+            std::optional<std::string>(std::to_string(kBuyId))});
+    conn.execute("DELETE FROM processed_commands WHERE command_id = $1 OR command_id = $2",
+        {std::optional<std::string>("replay-batch-sell"),
+            std::optional<std::string>("replay-batch-buy")});
+}
+
+// Тот же command_id дважды в одном файле --replay: второй раз обслуживается
+// из кеша идемпотентности (Status::Duplicate), попадает в duplicates, а не
+// в processed/trades сводки — CommandOutcome::Status::Duplicate до этой
+// правки не проверялся через Application::run вовсе.
+TEST(IntegrationTest, ApplicationRunReplayWithDuplicateCommandIdReportsDuplicate){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    auto& conn = *connOpt;
+
+    constexpr int kOrderId = 902100001;
+    conn.execute("DELETE FROM orders WHERE order_id = $1",
+        {std::optional<std::string>(std::to_string(kOrderId))});
+    conn.execute("DELETE FROM processed_commands WHERE command_id = $1",
+        {std::optional<std::string>("replay-duplicate")});
+
+    const std::filesystem::path replayPath = std::filesystem::temp_directory_path() /
+        "matching_engine_replay_duplicate_test.jsonl";
+    {
+        std::ofstream out(replayPath);
+        out << "{\"type\":\"ADD\",\"id\":" << kOrderId
+            << ",\"side\":\"BUY\",\"price\":100,\"quantity\":5,"
+               "\"command_id\":\"replay-duplicate\"}\n";
+        out << "{\"type\":\"ADD\",\"id\":" << kOrderId
+            << ",\"side\":\"BUY\",\"price\":100,\"quantity\":5,"
+               "\"command_id\":\"replay-duplicate\"}\n";
+    }
+
+    testing::internal::CaptureStdout();
+    const int exitCode = runApplication({"--replay", replayPath.string()});
+    const std::string stdoutOutput = testing::internal::GetCapturedStdout();
+    std::filesystem::remove(replayPath);
+
+    EXPECT_EQ(exitCode, 0);
+    EXPECT_NE(stdoutOutput.find("processed=1"), std::string::npos);
+    EXPECT_NE(stdoutOutput.find("duplicates=1"), std::string::npos);
+
+    conn.execute("DELETE FROM orders WHERE order_id = $1",
+        {std::optional<std::string>(std::to_string(kOrderId))});
+    conn.execute("DELETE FROM processed_commands WHERE command_id = $1",
+        {std::optional<std::string>("replay-duplicate")});
+}
+
+// Пустой файл --replay: цикл getline не выполняет ни одной итерации,
+// file.bad() ложно, сводка печатается с нулевыми счётчиками — отдельная
+// ветка от файла с содержимым.
+TEST(IntegrationTest, ApplicationRunReplayWithEmptyFileSucceedsWithZeroCounters){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+
+    const std::filesystem::path replayPath = std::filesystem::temp_directory_path() /
+        "matching_engine_replay_empty_test.jsonl";
+    { std::ofstream out(replayPath); }
+
+    testing::internal::CaptureStdout();
+    const int exitCode = runApplication({"--replay", replayPath.string()});
+    const std::string stdoutOutput = testing::internal::GetCapturedStdout();
+    std::filesystem::remove(replayPath);
+
+    EXPECT_EQ(exitCode, 0);
+    EXPECT_NE(stdoutOutput.find("processed=0"), std::string::npos);
+}
+
+// Application::run: ни --replay, ни позиционного JSON-аргумента —
+// parseArgs() возвращает errorMessage == kUsage, и run() обязан различить
+// этот случай от прочих ошибок разбора: usage печатается через
+// printer_.printUsage (без префикса ERROR:), а не через printError
+// (с префиксом). Не требует БД: до открытия соединения дело не доходит.
+TEST(IntegrationTest, ApplicationRunWithNoArgsPrintsUsage){
+    testing::internal::CaptureStderr();
+    const int exitCode = runApplication({});
+    const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+    EXPECT_EQ(exitCode, 1);
+    EXPECT_NE(stderrOutput.find("Usage:"), std::string::npos);
+    // Различающий признак ветки: printUsage не добавляет префикс ERROR:,
+    // в отличие от printError, которым обрабатываются прочие ошибки
+    // разбора аргументов (см. ApplicationRunWithMissingConfigFileReturnsErrorExitCode
+    // выше, где ERROR: обязателен).
+    EXPECT_EQ(stderrOutput.find("ERROR:"), std::string::npos);
+}
+
+// Application::run: конфигурация, соединение и схема в порядке, но
+// recoverState() бросает MatchingEngineError — до этой правки catch-ветка
+// "Recovery error" (src/application.cpp, вокруг recoverState) не
+// исполнялась ни разу ни одним тестом. Активная заявка с NULL-ценой в
+// orders — законное состояние по схеме (price INTEGER, без NOT NULL), но
+// нарушает доменное правило "у активной заявки обязана быть цена"
+// (OrderRepository::loadActive), поэтому OrderRepository кидает
+// DatabaseError, а Application::run переводит его в понятное сообщение
+// пользователю и код возврата 1, не роняя процесс необработанным
+// исключением.
+TEST(IntegrationTest, ApplicationRunWithNullPriceOnActiveOrderReturnsRecoveryErrorExitCode){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    auto& conn = *connOpt;
+    cleanupAllTables(conn);
+
+    constexpr int kBrokenOrderId = 902200001;
+    // Вставка напрямую по SQL, в обход движка: OrderRepository::save()
+    // никогда не производит такую комбинацию (validateOrderChange() не
+    // пускает её), поэтому единственный способ получить NULL-цену у
+    // активной заявки в этом тесте — вставить строку вручную, эмулируя
+    // испорченные данные, оставленные внешним вмешательством.
+    conn.execute(
+        "INSERT INTO orders (order_id, side, price, initial_quantity, remaining_quantity, "
+        "status, sequence_number) VALUES ($1, 'BUY', NULL, 5, 5, 'OPEN', $2)",
+        {std::optional<std::string>(std::to_string(kBrokenOrderId)),
+            std::optional<std::string>(std::to_string(kBrokenOrderId))});
+
+    testing::internal::CaptureStderr();
+    const int exitCode = runApplication({"{\"commands\":[]}"});
+    const std::string stderrOutput = testing::internal::GetCapturedStderr();
+
+    EXPECT_EQ(exitCode, 1);
+    EXPECT_NE(stderrOutput.find("Failed to recover state from the database"), std::string::npos);
+
+    conn.execute("DELETE FROM orders WHERE order_id = $1",
+        {std::optional<std::string>(std::to_string(kBrokenOrderId))});
+}
+
+// recoverState() с полностью пустыми orders/processed_commands: обе ветки
+// цикла (по активным заявкам и по обработанным командам) выполняются ноль
+// раз, а OrderRepository::maxSequenceNumber() получает NULL от MAX() над
+// пустой таблицей (её собственная ветка isNull) — до этой правки ни один
+// тест не вызывал recoverState() сразу после полной очистки таблиц, всегда
+// вставляя данные заранее.
+TEST(IntegrationTest, RecoveryWithEmptyDatabaseSucceedsAndBookStaysEmpty){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    auto& conn = *connOpt;
+    cleanupAllTables(conn);
+
+    CommandProcessor processor;
+    EXPECT_NO_THROW(recoverState(conn, processor));
+
+    // Восстанавливать нечего — книга остаётся пустой, а не падает и не
+    // выдумывает заявки.
+    EXPECT_EQ(processor.orderBook().findOrder(1), nullptr);
+
+    // Счётчик последовательности сброшен на 1 (maxSequenceNumber() вернула
+    // 0 из-за isNull-ветки), поэтому первая же новая заявка обязана
+    // получить sequence_number = 1 и нормально попасть в книгу.
+    constexpr int kFreshOrderId = 902300001;
+    AddCommand fresh(kFreshOrderId, Side::Buy, 100, 1);
+    fresh.commandId_ = "recovery-empty-fresh";
+    EXPECT_NO_THROW(processor.process(fresh, conn));
+    ASSERT_NE(processor.orderBook().findOrder(kFreshOrderId), nullptr);
+    EXPECT_EQ(processor.orderBook().findOrder(kFreshOrderId)->getSequenceNumber(), 1);
+
+    cleanupAllTables(conn);
+}
+
+// recoverState(): processed_commands.result может быть NULL (колонка
+// nullable) — CommandProcessor::warmCache() тогда прогревает кеш пустым
+// ExecutionResult вместо разбора JSON. До этой правки ни один тест не
+// доводил NULL до recoverState(): единственная другая вставка NULL-результата
+// в этом файле (network_tests.cpp) намеренно обходит recoverState(), чтобы
+// проверить противоположный сценарий — конфликт при записи. Здесь же
+// значение NULL нужно ИМЕННО прочитать через recoverState() и убедиться,
+// что повтор той же команды после восстановления считается уже
+// обработанной (кеш прогрет), но без единой сделки — свидетельство, что
+// результат восстановлен как пустой, а не разобран из мусора.
+TEST(IntegrationTest, RecoveryWarmsCacheWithEmptyResultWhenStoredResultIsNull){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    auto& conn = *connOpt;
+    cleanupAllTables(conn);
+
+    const std::string commandId = "recovery-null-result";
+    conn.execute(
+        "INSERT INTO processed_commands (command_id, command_type, status, result) "
+        "VALUES ($1, 'ADD', 'APPLIED', NULL)",
+        {std::optional<std::string>(commandId)});
+
+    CommandProcessor processor;
+    EXPECT_NO_THROW(recoverState(conn, processor));
+
+    // Повтор того же command_id обязан быть опознан кешем (Duplicate),
+    // но не задеть книгу и не дать ни одной сделки: содержимое команды
+    // здесь намеренно не совпадает с тем, что "было" исходно (никакой
+    // исходной команды и не было) — единственная причина, по которой
+    // process() не пойдёт в движок, это прогретый кеш.
+    constexpr int kOrderId = 902400001;
+    AddCommand repeat(kOrderId, Side::Buy, 100, 5);
+    repeat.commandId_ = commandId;
+    bool servedFromCache = false;
+    ExecutionResult result = processor.process(repeat, conn, &servedFromCache);
+
+    EXPECT_TRUE(servedFromCache);
+    EXPECT_TRUE(result.trades.empty());
+    // Книга не тронута: process() вернулся из кеша до вызова движка,
+    // поэтому order_id из "повторной" команды в книгу не попал.
+    EXPECT_EQ(processor.orderBook().findOrder(kOrderId), nullptr);
+
+    conn.execute("DELETE FROM processed_commands WHERE command_id = $1",
+        {std::optional<std::string>(commandId)});
+}
+
+// PersistenceService::saveBatch(): её собственная catch-ветка
+// (MatchingEngineError -> PersistenceError) не была покрыта ни одним тестом
+// — существующие тесты на flushBatch (command_processor_tests.cpp) проверяют
+// только счастливый путь. Строка processed_commands с тем же command_id
+// вставляется напрямую по SQL заранее, в обход кеша идемпотентности свежего
+// CommandProcessor (кеш не прогревается — recoverState() здесь не
+// вызывается, как и в network_tests.cpp для того же save()): движок честно
+// обрабатывает ADD и кладёт результат в буфер пакета, а сам INSERT при
+// flushBatch() упирается в нарушение уникальности command_id и
+// перехватывается PersistenceService::saveBatch(), оборачиваясь в
+// PersistenceError — то же самое исключение, что и у save(), но с другого
+// пути кода.
+TEST(IntegrationTest, FlushBatchWithPreexistingCommandIdThrowsPersistenceError){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    auto& conn = *connOpt;
+    cleanupAllTables(conn);
+
+    const std::string commandId = "batch-flush-conflict";
+    constexpr int kOrderId = 902500001;
+
+    conn.execute(
+        "INSERT INTO processed_commands (command_id, command_type, status, result) "
+        "VALUES ($1, 'ADD', 'APPLIED', NULL)",
+        {std::optional<std::string>(commandId)});
+
+    CommandProcessor processor;
+    AddCommand add(kOrderId, Side::Buy, 100, 5);
+    add.commandId_ = commandId;
+    // Кеш processor'а пуст (recoverState не вызывался) — processBatched
+    // честно выполнит сопоставление и положит результат в буфер, ничего
+    // ещё не записав в БД.
+    EXPECT_NO_THROW(processor.processBatched(add));
+    ASSERT_NE(processor.orderBook().findOrder(kOrderId), nullptr);
+    EXPECT_EQ(processor.pendingCount(), 1u);
+
+    EXPECT_THROW(processor.flushBatch(conn), PersistenceError);
+
+    // Транзакция saveBatch() откатилась целиком (PgTransaction RAII) —
+    // ни строка orders, ни вторая строка processed_commands не должны были
+    // просочиться в БД, несмотря на то что движок в памяти уже применил ADD.
+    PgResult orderRow = conn.execute("SELECT COUNT(*) FROM orders WHERE order_id = $1",
+        {std::optional<std::string>(std::to_string(kOrderId))});
+    ASSERT_EQ(orderRow.rowCount(), 1);
+    EXPECT_EQ(orderRow.getValue(0, 0), "0");
+
+    conn.execute("DELETE FROM processed_commands WHERE command_id = $1",
+        {std::optional<std::string>(commandId)});
 }

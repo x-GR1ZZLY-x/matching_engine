@@ -13,8 +13,8 @@ namespace matching_engine{
 // Граница транзакции для одной изменяющей команды (REQ-TX-01/02): пишет
 // заявки, сделки и запись об обработанной команде одной PgTransaction —
 // либо всё, либо ничего. Сама не решает, что писать и как это сериализовать
-// в JSON — только вызывает репозитории задачи 06 по очереди в порядке,
-// заданном внешними ключами схемы (заявки прежде сделок, docs/tasks/task-07.md п.0).
+// в JSON — только вызывает репозитории по очереди в порядке,
+// заданном внешними ключами схемы (заявки прежде сделок).
 class PersistenceService{
 public:
     // Бросает PersistenceError, если сохранение не удалось. Транзакция к
@@ -30,10 +30,10 @@ public:
     void save(PgConnection& connection, const ExecutionResult& result,
         const ProcessedCommandRecord& record);
 
-    // Пакетная запись при --replay --batch (задача 12, REQ-OPT-03): весь
+    // Пакетная запись при --replay --batch (REQ-OPT-03): весь
     // накопленный пакет command'ов — одна PgTransaction, а не одна на
-    // команду (это отдельный от save() путь, штатный save() не меняется —
-    // критерий 3 задачи 12). results и records — параллельные векторы (как
+    // команду (это отдельный от save() путь, штатный save() не меняется).
+    // results и records — параллельные векторы (как
     // pendingResults_/pendingRecords_ у CommandProcessor), по одному
     // ExecutionResult и одной ProcessedCommandRecord на команду пакета, в
     // порядке обработки.

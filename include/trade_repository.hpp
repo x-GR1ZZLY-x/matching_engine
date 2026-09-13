@@ -16,7 +16,7 @@ public:
     // (include/trade.hpp) поля с идентификатором вообще не имеет.
     void insert(PgConnection& connection, const Trade& trade);
 
-    // Пакетная запись (задача 12, REQ-OPT-03): многострочный INSERT на весь
+    // Пакетная запись (REQ-OPT-03): многострочный INSERT на весь
     // список сделок пакета, за один или несколько execute() (см.
     // sql_batch_insert.hpp — список режется по числу строк, если иначе
     // запрос превысил бы протокольный предел параметров PostgreSQL). В

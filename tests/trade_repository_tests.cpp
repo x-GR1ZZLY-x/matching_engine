@@ -61,3 +61,51 @@ TEST(TradeRepositoryTest, LoadAllReturnsTradesOrderedByTradeId){
     EXPECT_EQ(testTrades[1].getPrice(), 100);
     EXPECT_EQ(testTrades[1].getQuantity(), 3);
 }
+
+// insertBatch() (REQ-OPT-03) не был покрыт ни одним тестом — до этой правки
+// executeBatchedInsert ни разу не выполнялся с 4-колоночной формой запроса
+// TradeRepository. Обычный путь: несколько сделок одним многострочным
+// INSERT.
+TEST(TradeRepositoryTest, InsertBatchPersistsAllRows){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    auto& conn = *connOpt;
+    PgTransaction tx(conn);
+
+    OrderRepository orderRepo;
+    orderRepo.save(conn, OrderChange{900000811, Side::Buy, 100, 20, 20,
+        OrderStatus::Open, 900000811});
+    orderRepo.save(conn, OrderChange{900000812, Side::Sell, 100, 20, 20,
+        OrderStatus::Open, 900000812});
+
+    TradeRepository tradeRepo;
+    std::vector<Trade> trades{
+        Trade(900000811, 900000812, 100, 4),
+        Trade(900000811, 900000812, 100, 6),
+        Trade(900000811, 900000812, 100, 10),
+    };
+
+    tradeRepo.insertBatch(conn, trades);
+
+    PgResult rows = conn.execute(
+        "SELECT COUNT(*) FROM trades WHERE buy_order_id = $1 AND sell_order_id = $2",
+        {std::optional<std::string>("900000811"), std::optional<std::string>("900000812")});
+    ASSERT_EQ(rows.rowCount(), 1);
+    EXPECT_EQ(rows.getValue(0, 0), "3");
+}
+
+// Пустой список — no-op (см. sql_batch_insert.hpp): вызов не должен
+// бросать и не должен выполнять ни одного execute().
+TEST(TradeRepositoryTest, InsertBatchWithEmptyListIsNoOp){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    auto& conn = *connOpt;
+    PgTransaction tx(conn);
+
+    TradeRepository tradeRepo;
+    EXPECT_NO_THROW(tradeRepo.insertBatch(conn, {}));
+}
