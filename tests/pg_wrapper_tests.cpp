@@ -198,6 +198,126 @@ TEST(PgWrapperIntegrationTest, IsConnectedReflectsActualConnectionState){
     EXPECT_FALSE(conn.isConnected());
 }
 
+// Синтаксически неверный SQL обязан приводить к DatabaseError через ветку
+// "status != PGRES_TUPLES_OK/PGRES_COMMAND_OK" в конструкторе PgResult, а не
+// к неопределённому поведению или тихому пустому результату.
+TEST(PgWrapperIntegrationTest, ExecuteWithInvalidSqlThrows){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    auto& conn = *connOpt;
+
+    EXPECT_THROW(conn.execute("SELECT this is not valid sql"), DatabaseError);
+
+    // Соединение остаётся рабочим после отклонённого сервером запроса —
+    // следующая обычная команда должна пройти как ни в чём не бывало.
+    PgResult result = conn.execute("SELECT 1");
+    ASSERT_EQ(result.rowCount(), 1);
+    EXPECT_EQ(result.getValue(0, 0), "1");
+}
+
+// Первый вызов с новым именем готовит запрос (PQprepare + вставка в
+// preparedStatements_), второй вызов с тем же именем обязан пропустить
+// подготовку и сразу выполнить PQexecPrepared. Без этого теста ветка
+// "имя уже подготовлено" не проходится ни разу.
+TEST(PgWrapperIntegrationTest, ExecutePreparedReusesStatementOnSecondCall){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    auto& conn = *connOpt;
+
+    const std::string sql = "SELECT $1::INTEGER + 1";
+
+    PgResult first = conn.executePrepared("pg_wrapper_test_increment", sql,
+        {std::optional<std::string>("41")});
+    ASSERT_EQ(first.rowCount(), 1);
+    EXPECT_EQ(first.getValue(0, 0), "42");
+
+    // Тот же name, sql передаётся снова, но подготовка повторно не
+    // выполняется — если бы имя не запоминалось, PQprepare с тем же именем
+    // на этой сессии сервер бы отверг.
+    PgResult second = conn.executePrepared("pg_wrapper_test_increment", sql,
+        {std::optional<std::string>("99")});
+    ASSERT_EQ(second.rowCount(), 1);
+    EXPECT_EQ(second.getValue(0, 0), "100");
+}
+
+// Если PQprepare проваливается (ошибка в sql), имя не должно попасть в
+// preparedStatements_ — иначе следующая попытка подготовить то же имя
+// корректным sql считалась бы "уже подготовленной" и обратилась бы прямо к
+// PQexecPrepared с несуществующим на сервере запросом.
+TEST(PgWrapperIntegrationTest, ExecutePreparedDoesNotRememberNameAfterPrepareFailure){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    auto& conn = *connOpt;
+
+    EXPECT_THROW(conn.executePrepared("pg_wrapper_test_retry", "SELECT this is not valid sql"),
+        DatabaseError);
+
+    // Тем же именем, но теперь валидным sql — обязано подготовиться и
+    // выполниться заново, а не упасть на "запрос не найден".
+    PgResult result = conn.executePrepared("pg_wrapper_test_retry", "SELECT 7");
+    ASSERT_EQ(result.rowCount(), 1);
+    EXPECT_EQ(result.getValue(0, 0), "7");
+}
+
+// executeScript — единственный метод, принимающий несколько операторов через
+// ';' в одной строке; execute()/executePrepared() такого не умеют
+// (PQexecParams ожидает ровно один оператор).
+TEST(PgWrapperIntegrationTest, ExecuteScriptRunsMultipleStatements){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    auto& conn = *connOpt;
+
+    conn.executeScript(
+        "CREATE TEMPORARY TABLE pg_wrapper_script_test (id INTEGER);"
+        "INSERT INTO pg_wrapper_script_test (id) VALUES (1);"
+        "INSERT INTO pg_wrapper_script_test (id) VALUES (2);");
+
+    PgResult result = conn.execute("SELECT COUNT(*) FROM pg_wrapper_script_test");
+    ASSERT_EQ(result.rowCount(), 1);
+    EXPECT_EQ(result.getValue(0, 0), "2");
+}
+
+// rowCount() на результате без строк — ветка, не задействованная ни одним
+// существующим тестом (все они читают ровно одну строку).
+TEST(PgWrapperIntegrationTest, RowCountIsZeroForEmptyResult){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    auto& conn = *connOpt;
+
+    conn.execute("CREATE TEMPORARY TABLE pg_wrapper_empty_test (id INTEGER)");
+    PgResult result = conn.execute("SELECT id FROM pg_wrapper_empty_test");
+
+    EXPECT_EQ(result.rowCount(), 0);
+}
+
+// isNull() на непустом значении — обратная ветка от
+// NullParameterReachesServerAsNull ниже, которая проверяет только "true".
+TEST(PgWrapperIntegrationTest, IsNullReturnsFalseForNonNullValue){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    auto& conn = *connOpt;
+
+    conn.execute("CREATE TEMPORARY TABLE pg_wrapper_not_null_test (price INTEGER)");
+    conn.execute("INSERT INTO pg_wrapper_not_null_test (price) VALUES ($1)",
+        {std::optional<std::string>("10")});
+
+    PgResult result = conn.execute("SELECT price FROM pg_wrapper_not_null_test");
+    ASSERT_EQ(result.rowCount(), 1);
+    EXPECT_FALSE(result.isNull(0, 0));
+}
+
 TEST(PgWrapperIntegrationTest, NullParameterReachesServerAsNull){
     auto connOpt = tryConnect();
     if(!connOpt){
@@ -212,4 +332,168 @@ TEST(PgWrapperIntegrationTest, NullParameterReachesServerAsNull){
     PgResult result = conn.execute("SELECT price FROM pg_wrapper_null_test");
     ASSERT_EQ(result.rowCount(), 1);
     EXPECT_TRUE(result.isNull(0, 0));
+}
+
+// columnCount() не был вызван ни одним тестом до этой правки — ни через
+// прямой вызов, ни через какой-либо из репозиториев (все они читают
+// значения по фиксированным индексам, не запрашивая число колонок).
+TEST(PgWrapperIntegrationTest, ColumnCountReturnsNumberOfSelectedFields){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    auto& conn = *connOpt;
+
+    PgResult result = conn.execute("SELECT 1, 2, 3");
+    EXPECT_EQ(result.columnCount(), 3);
+}
+
+// execute()/executePrepared()/executeScript() на соединении, из которого уже
+// переместили (conn_ == nullptr), обязаны бросать DatabaseError с понятным
+// сообщением, а не разыменовывать пустой unique_ptr. Ни один из трёх методов
+// не был проверен в этом состоянии ни одним тестом — MoveConstructor*-тесты
+// выше проверяют только само перемещение, не последующее использование
+// источника.
+// Проверяет именно текст "moved from", а не только тип исключения: без
+// собственной проверки conn_ на nullptr вызов PQexecParams(nullptr, ...)
+// тоже возвращает NULL-результат и код всё равно бросает DatabaseError через
+// более позднюю проверку "if(!result)" — тест на одном лишь типе исключения
+// прошёл бы и без выделенной проверки "moved from" в начале execute().
+TEST(PgWrapperIntegrationTest, ExecuteOnMovedFromConnectionThrows){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+
+    PgConnection moved(std::move(*connOpt));
+    try{
+        connOpt->execute("SELECT 1");
+        FAIL() << "Ожидалось исключение DatabaseError";
+    }catch(const DatabaseError& e){
+        EXPECT_NE(std::string(e.what()).find("moved from"), std::string::npos) << e.what();
+    }
+}
+
+// См. пояснение у ExecuteOnMovedFromConnectionThrows выше — тот же приём
+// нужен и здесь: PQprepare(nullptr, ...) тоже возвращает NULL и код бросает
+// DatabaseError через отдельную более позднюю проверку, маскируя отсутствие
+// выделенной проверки conn_ в начале executePrepared().
+TEST(PgWrapperIntegrationTest, ExecutePreparedOnMovedFromConnectionThrows){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+
+    PgConnection moved(std::move(*connOpt));
+    try{
+        connOpt->executePrepared("pg_wrapper_moved_from_test", "SELECT 1");
+        FAIL() << "Ожидалось исключение DatabaseError";
+    }catch(const DatabaseError& e){
+        EXPECT_NE(std::string(e.what()).find("moved from"), std::string::npos) << e.what();
+    }
+}
+
+// См. пояснение у ExecuteOnMovedFromConnectionThrows выше. executeScript()
+// вообще не проверяет PQexec(...) на nullptr результат отдельно — без
+// собственной проверки conn_ здесь PgResult(nullptr) бросит "libpq returned
+// no result", тоже DatabaseError, но с другим текстом.
+TEST(PgWrapperIntegrationTest, ExecuteScriptOnMovedFromConnectionThrows){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+
+    PgConnection moved(std::move(*connOpt));
+    try{
+        connOpt->executeScript("SELECT 1");
+        FAIL() << "Ожидалось исключение DatabaseError";
+    }catch(const DatabaseError& e){
+        EXPECT_NE(std::string(e.what()).find("moved from"), std::string::npos) << e.what();
+    }
+}
+
+// isConnected() на соединении, из которого переместили, обязана вернуть
+// false через короткое замыкание "conn_ &&..." — не обращаясь к PQstatus на
+// пустом указателе. Все существующие тесты на isConnected() проверяют только
+// живое и оборванное-сервером соединение, ни один — состояние после move.
+TEST(PgWrapperIntegrationTest, IsConnectedReturnsFalseAfterMove){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+
+    PgConnection moved(std::move(*connOpt));
+    EXPECT_FALSE(connOpt->isConnected());
+}
+
+// Присваивание самому себе — "if(this == &other) return *this;" — не должно
+// разрушать соединение. Обходной путь через указатель нужен, чтобы компилятор
+// не подставил здесь статическую диагностику самоприсваивания и реально
+// прогнал этот рантайм-путь.
+TEST(PgWrapperIntegrationTest, MoveAssignmentToSelfIsNoOp){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    auto& conn = *connOpt;
+
+    PgConnection* self = &conn;
+    conn = std::move(*self);
+
+    PgResult result = conn.execute("SELECT 1");
+    ASSERT_EQ(result.rowCount(), 1);
+    EXPECT_EQ(result.getValue(0, 0), "1");
+}
+
+// MoveAssignmentWithActiveTransactionThrows (выше) проверяет только активную
+// транзакцию на ИСТОЧНИКЕ присваивания. Условие в operator=() — "||" из двух
+// независимых проверок, и ветка "активна транзакция на НАЗНАЧЕНИИ, источник
+// свободен" ни разу не была пройдена ни одним тестом.
+TEST(PgWrapperIntegrationTest, MoveAssignmentWithActiveTransactionOnDestinationThrows){
+    auto destOpt = tryConnect();
+    auto sourceOpt = tryConnect();
+    if(!destOpt || !sourceOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+
+    PgTransaction tx(*destOpt);
+    EXPECT_THROW(*destOpt = std::move(*sourceOpt), DatabaseError);
+
+    // Оба соединения остались рабочими — перемещения не произошло.
+    PgResult result = sourceOpt->execute("SELECT 1");
+    ASSERT_EQ(result.rowCount(), 1);
+    EXPECT_EQ(result.getValue(0, 0), "1");
+}
+
+// ~PgTransaction() оборачивает ROLLBACK в try/catch(...) именно потому, что
+// он может провалиться на уже неработоспособном соединении — деструктор не
+// имеет права бросать. Этот путь не был пройден ни одним тестом: во всех
+// остальных тестах соединение в момент разрушения PgTransaction остаётся
+// рабочим. Ломает соединение тем же приёмом, что и
+// IsConnectedReflectsActualConnectionState, но уже под открытой транзакцией.
+TEST(PgWrapperIntegrationTest, TransactionDestructorSwallowsRollbackFailureOnBrokenConnection){
+    auto connOpt = tryConnect();
+    if(!connOpt){
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    auto& conn = *connOpt;
+
+    {
+        PgTransaction tx(conn);
+        try{
+            conn.execute("SELECT pg_terminate_backend(pg_backend_pid())");
+        }catch(const DatabaseError&){
+        }
+        // Выход из области видимости здесь вызывает ~PgTransaction() на уже
+        // оборванном соединении: ROLLBACK внутри обязан провалиться и быть
+        // проглочен, а не вылететь из деструктора наружу.
+    }
+
+    // Сам факт, что мы дошли до этой строки, доказывает, что деструктор не
+    // бросил исключение наружу. Он также обязан был декрементировать счётчик
+    // активных транзакций несмотря на провал ROLLBACK — иначе следующее
+    // перемещение соединения отказало бы с сообщением про "открытую
+    // транзакцию", а не по настоящей причине (мёртвое соединение).
+    PgConnection moved(std::move(conn));
+    EXPECT_FALSE(moved.isConnected());
 }

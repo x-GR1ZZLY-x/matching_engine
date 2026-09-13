@@ -192,9 +192,11 @@ add_executable(
     tests/command_processor_tests.cpp
     tests/integration_tests.cpp
     tests/message_codec_tests.cpp
+    tests/response_serializer_tests.cpp
     tests/request_router_tests.cpp
     tests/network_tests.cpp
     tests/signal_handler_tests.cpp
+    tests/report_printer_tests.cpp
 )
 
 target_include_directories(

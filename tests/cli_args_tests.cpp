@@ -126,3 +126,61 @@ TEST(CliArgsTest, ClientWithOutOfRangePortFails){
     EXPECT_FALSE(ok);
     EXPECT_FALSE(error.empty());
 }
+
+// Отсутствие --host не покрыто ни одним существующим тестом: без него
+// пропала бы ветка "host.empty()" в parseClientArgs — единственный тест на
+// отсутствующий аргумент до этого проверял только --port.
+TEST(CliArgsTest, ClientWithoutHostFails){
+    std::string host, port, error;
+
+    const bool ok = callParseClientArgs({"--port", "9000"}, host, port, error);
+
+    EXPECT_FALSE(ok);
+    EXPECT_FALSE(error.empty());
+}
+
+// "--host" без значения — отдельная ветка от "--host отсутствует вовсе":
+// здесь опция встречена, но argv кончился раньше её значения.
+TEST(CliArgsTest, ClientHostOptionWithoutValueFails){
+    std::string host, port, error;
+
+    const bool ok = callParseClientArgs({"--host"}, host, port, error);
+
+    EXPECT_FALSE(ok);
+    EXPECT_FALSE(error.empty());
+}
+
+// Тот же случай для "--port": опция есть, значения нет.
+TEST(CliArgsTest, ClientPortOptionWithoutValueFails){
+    std::string host, port, error;
+
+    const bool ok = callParseClientArgs({"--host", "127.0.0.1", "--port"}, host, port, error);
+
+    EXPECT_FALSE(ok);
+    EXPECT_FALSE(error.empty());
+}
+
+// Неизвестный флаг у клиента — ветка else в parseClientArgs, отдельная от
+// той же ветки у сервера (ServerUnknownOptionFails покрывает только
+// parseServerArgs).
+TEST(CliArgsTest, ClientUnknownOptionFails){
+    std::string host, port, error;
+
+    const bool ok = callParseClientArgs({"--verbose"}, host, port, error);
+
+    EXPECT_FALSE(ok);
+    EXPECT_EQ(error, "Unknown option: --verbose");
+}
+
+// Порт длиннее пяти цифр обязан отсекаться проверкой длины в isValidPort до
+// вызова std::stoi: "99999" (пять цифр, отвергается по значению) не
+// упражняет ветку "port.size() > 5" отдельно от ветки диапазона значений.
+TEST(CliArgsTest, ClientWithPortLongerThanFiveDigitsFails){
+    std::string host, port, error;
+
+    const bool ok = callParseClientArgs({"--host", "127.0.0.1", "--port", "123456"}, host, port,
+        error);
+
+    EXPECT_FALSE(ok);
+    EXPECT_FALSE(error.empty());
+}

@@ -433,6 +433,199 @@ TEST(ConfigTest, MaxMessageSizeAtLowerBoundIsAccepted){
 // "RESPONSE_TOO_LARGE", и тест покраснеет раньше, чем сервер окажется в
 // ветке "даже короткий ответ об ошибке не влез", которую остальные
 // комментарии проекта считают недостижимой.
+// Корень файла — законный JSON, но не объект: без этой проверки root.at(...)
+// в requireSection бросил бы низкоуровневое исключение nlohmann::json
+// вместо внятного ConfigError.
+TEST(ConfigTest, RootNotObjectThrowsConfigError){
+    const ScopedTempFile tempFile("root_not_object", "[1, 2, 3]");
+    ScopedEnv env("MATCHING_ENGINE_DB_PASSWORD", "s3cret");
+
+    EXPECT_THROW(loadConfig(tempFile.path()), ConfigError);
+}
+
+// "server" присутствует, но это не объект — requireSection обязана отличать
+// "секции нет" от "секция есть, но неправильного типа" и в обоих случаях
+// давать ConfigError, а не падать на .at()/.contains() глубже.
+TEST(ConfigTest, ServerSectionNotObjectThrowsConfigError){
+    const ScopedTempFile tempFile("server_not_object", R"({
+        "server": "not-an-object",
+        "database": {
+            "host": "db.example.test",
+            "port": 6543,
+            "name": "some_db",
+            "user": "some_user",
+            "schema_dir": "database"
+        }
+    })");
+    ScopedEnv env("MATCHING_ENGINE_DB_PASSWORD", "s3cret");
+
+    EXPECT_THROW(loadConfig(tempFile.path()), ConfigError);
+}
+
+// Тот же случай для "database": число вместо объекта.
+TEST(ConfigTest, DatabaseSectionNotObjectThrowsConfigError){
+    const ScopedTempFile tempFile("database_not_object", R"({
+        "server": {
+            "address": "0.0.0.0",
+            "port": 9000,
+            "max_message_size": 1048576
+        },
+        "database": 5
+    })");
+    ScopedEnv env("MATCHING_ENGINE_DB_PASSWORD", "s3cret");
+
+    EXPECT_THROW(loadConfig(tempFile.path()), ConfigError);
+}
+
+// Строковое поле, пришедшее числом: requireString обязана отвергать любое
+// не-строковое значение, а не только отсутствие поля.
+TEST(ConfigTest, StringFieldWithWrongTypeThrowsConfigError){
+    const ScopedTempFile tempFile("address_wrong_type", R"({
+        "server": {
+            "address": 123,
+            "port": 9000,
+            "max_message_size": 1048576
+        },
+        "database": {
+            "host": "db.example.test",
+            "port": 6543,
+            "name": "some_db",
+            "user": "some_user",
+            "schema_dir": "database"
+        }
+    })");
+    ScopedEnv env("MATCHING_ENGINE_DB_PASSWORD", "s3cret");
+
+    EXPECT_THROW(loadConfig(tempFile.path()), ConfigError);
+}
+
+// Отрицательный порт обязан отвергаться той же проверкой, что и
+// нечисловой/переполняющий — requireNonNegativeInt должна ловить знак,
+// а не полагаться только на верхнюю границу requirePort.
+TEST(ConfigTest, NegativePortThrowsConfigError){
+    const ScopedTempFile tempFile("negative_port", R"({
+        "server": {
+            "address": "0.0.0.0",
+            "port": -1,
+            "max_message_size": 1048576
+        },
+        "database": {
+            "host": "db.example.test",
+            "port": 6543,
+            "name": "some_db",
+            "user": "some_user",
+            "schema_dir": "database"
+        }
+    })");
+    ScopedEnv env("MATCHING_ENGINE_DB_PASSWORD", "s3cret");
+
+    EXPECT_THROW(loadConfig(tempFile.path()), ConfigError);
+}
+
+// Отрицательный max_message_size — отдельная ветка от "меньше нижней
+// границы": requireNonNegativeInt обязана отсечь знак раньше, чем
+// requireMaxMessageSize вообще сравнит значение с minMaxMessageSize().
+TEST(ConfigTest, NegativeMaxMessageSizeThrowsConfigError){
+    const ScopedTempFile tempFile("negative_max_message_size", R"({
+        "server": {
+            "address": "0.0.0.0",
+            "port": 9000,
+            "max_message_size": -1
+        },
+        "database": {
+            "host": "db.example.test",
+            "port": 6543,
+            "name": "some_db",
+            "user": "some_user",
+            "schema_dir": "database"
+        }
+    })");
+    ScopedEnv env("MATCHING_ENGINE_DB_PASSWORD", "s3cret");
+
+    EXPECT_THROW(loadConfig(tempFile.path()), ConfigError);
+}
+
+// requireNonNegativeInt используется и для server.port/max_message_size, и
+// для database.port, но во всех тестах выше отсутствие числового поля не
+// проверялось отдельно: MissingRequiredFieldThrowsConfigError и
+// MissingSchemaDirThrowsConfigError снимают только строковые поля
+// (database.user, database.schema_dir), а числовые поля либо присутствуют
+// с неверным значением (PortAsString, NegativePort...), либо отсутствуют
+// вместе со всей секцией. Ветка "поле отсутствует" в requireNonNegativeInt
+// поэтому ни разу не срабатывала для числового поля — эти три теста
+// закрывают её для server.port, server.max_message_size и database.port.
+TEST(ConfigTest, MissingServerPortThrowsConfigError){
+    const ScopedTempFile tempFile("missing_server_port", R"({
+        "server": {
+            "address": "0.0.0.0",
+            "max_message_size": 1048576
+        },
+        "database": {
+            "host": "db.example.test",
+            "port": 6543,
+            "name": "some_db",
+            "user": "some_user",
+            "schema_dir": "database"
+        }
+    })");
+    ScopedEnv env("MATCHING_ENGINE_DB_PASSWORD", "s3cret");
+
+    try{
+        loadConfig(tempFile.path());
+        FAIL() << "loadConfig must throw when server.port is missing";
+    } catch(const ConfigError& e){
+        EXPECT_NE(std::string(e.what()).find("server.port"), std::string::npos);
+    }
+}
+
+TEST(ConfigTest, MissingServerMaxMessageSizeThrowsConfigError){
+    const ScopedTempFile tempFile("missing_server_max_message_size", R"({
+        "server": {
+            "address": "0.0.0.0",
+            "port": 9000
+        },
+        "database": {
+            "host": "db.example.test",
+            "port": 6543,
+            "name": "some_db",
+            "user": "some_user",
+            "schema_dir": "database"
+        }
+    })");
+    ScopedEnv env("MATCHING_ENGINE_DB_PASSWORD", "s3cret");
+
+    try{
+        loadConfig(tempFile.path());
+        FAIL() << "loadConfig must throw when server.max_message_size is missing";
+    } catch(const ConfigError& e){
+        EXPECT_NE(std::string(e.what()).find("server.max_message_size"), std::string::npos);
+    }
+}
+
+TEST(ConfigTest, MissingDatabasePortThrowsConfigError){
+    const ScopedTempFile tempFile("missing_database_port", R"({
+        "server": {
+            "address": "0.0.0.0",
+            "port": 9000,
+            "max_message_size": 1048576
+        },
+        "database": {
+            "host": "db.example.test",
+            "name": "some_db",
+            "user": "some_user",
+            "schema_dir": "database"
+        }
+    })");
+    ScopedEnv env("MATCHING_ENGINE_DB_PASSWORD", "s3cret");
+
+    try{
+        loadConfig(tempFile.path());
+        FAIL() << "loadConfig must throw when database.port is missing";
+    } catch(const ConfigError& e){
+        EXPECT_NE(std::string(e.what()).find("database.port"), std::string::npos);
+    }
+}
+
 TEST(ConfigTest, WorstCaseErrorResponseFitsWithinLowerBoundForEachUsedCode){
     const std::string worstCaseCommandId(ResponseSerializer::kMaxCommandIdLength,
         static_cast<char>(1));

@@ -218,6 +218,46 @@ void runInIoContext(TestServer& testServer, const std::function<void()>& fn) {
         << "задача не выполнилась в io_context сервера за отведённое время";
 }
 
+// Подключение к порту, на котором никто не слушает (сервер уже остановлен
+// или разрушен), обязано провалиться обрывом. На ядре WSL2 6.18
+// close() слушающего сокета не гарантирует немедленную видимость снаружи —
+// есть окно меньше 50 мс, в котором свежий connect() на уже закрытый порт
+// ещё успевает завершить handshake на уровне ядра (docs/hw4/issues.md,
+// запись 34: воспроизведено минимальной репродукцией на чистом Boost.Asio,
+// без единой строчки из src/, — это особенность ядра, а не гонка в
+// Server/Session). Поэтому неожиданный успех connect() здесь — повод
+// подождать освобождения порта и попробовать снова, а не сразу считать
+// тест упавшим. Ожидание — boost::asio::steady_timer с completion-хендлером
+// (тот же идиом, что и в Session/Server), не std::this_thread::sleep_for;
+// суммарный дедлайн ограничен, и по его истечении тест обязан упасть, а не
+// зависнуть.
+void expectConnectFailsWithNetworkError(const std::string& host, unsigned short port,
+    std::size_t maxMessageSize) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    for (;;) {
+        Client client(maxMessageSize);
+        try {
+            client.connect(host, port);
+        } catch (const NetworkTimeoutError&) {
+            FAIL() << "отказ в подключении обязан приходить обрывом, а не таймаутом";
+            return;
+        } catch (const NetworkError&) {
+            return;
+        }
+
+        if (std::chrono::steady_clock::now() >= deadline) {
+            FAIL() << "подключение к закрытому порту не провалилось за отведённое время"
+                      " (порт так и не был освобождён ОС)";
+            return;
+        }
+
+        boost::asio::io_context waitContext;
+        boost::asio::steady_timer timer(waitContext, std::chrono::milliseconds(20));
+        timer.async_wait([](const boost::system::error_code&) {});
+        waitContext.run();
+    }
+}
+
 // Присоединяется к io-потоку сервера, ожидая, что тот остановится сам
 // (Server::onFatalShutdown_ после сбоя сохранения). Каждый сетевой тест
 // обязан иметь ограничение по времени и падать, а не висеть, — это верно
@@ -556,6 +596,59 @@ TEST(NetworkTest, MessageTooLargeIsQueuedBehindPendingResponseBeforeClosing) {
     }
 }
 
+// Замечание аудита покрытия: closeAfterMessageTooLarge() ловит собственный
+// enqueueResponse() в try/catch(MessageTooLargeError&) на случай, когда даже
+// короткий системный ответ MESSAGE_TOO_LARGE не помещается в
+// max_message_size, — этот путь не был покрыт ни одним тестом. Предел
+// сервера установлен в 10 байт: любой валидный ответ ({"status":"ERROR",
+// "error":"MESSAGE_TOO_LARGE","message":"..."} — не меньше полусотни байт
+// даже без текста message) заведомо не поместится, поэтому сервер обязан
+// закрыть соединение, не отправив ни единого байта, и остаться живым для
+// следующего клиента. Заголовок кадра собран вручную (big-endian
+// std::uint32_t, тот же порядок байт, что и в MessageCodec::encode) —
+// MessageCodec клиента сам отверг бы кадр с объявленным размером больше
+// собственного предела, а здесь предел клиента (4096) специально больше
+// заявленного в заголовке (1000), чтобы кодек клиента кадр пропустил, а
+// протокол нарушил именно заголовок, приходящий на сервер.
+TEST(NetworkTest, MessageTooLargeResponseThatDoesNotFitClosesConnectionWithoutAnyResponse) {
+    constexpr std::size_t kTinyLimit = 10;
+    TestServer testServer(kTinyLimit);
+
+    Client client(4096);
+    client.connect("127.0.0.1", testServer.port());
+
+    constexpr std::uint32_t declaredSize = 1000;
+    std::string header(kFrameHeaderSize, '\0');
+    header[0] = static_cast<char>((declaredSize >> 24) & 0xFFu);
+    header[1] = static_cast<char>((declaredSize >> 16) & 0xFFu);
+    header[2] = static_cast<char>((declaredSize >> 8) & 0xFFu);
+    header[3] = static_cast<char>(declaredSize & 0xFFu);
+    client.sendRawBytes(header);
+
+    // Сервер обязан закрыть соединение без единого байта ответа: даже
+    // MESSAGE_TOO_LARGE не помещается в предел в 10 байт. Различение
+    // обрыва от таймаута — тем же приёмом, что и в остальных тестах файла:
+    // молчащий сервер (регрессия) дал бы NetworkTimeoutError, а не обрыв.
+    try {
+        client.receiveFrame();
+        FAIL() << "сервер обязан был закрыть соединение, не отправив ответ";
+    } catch (const NetworkTimeoutError&) {
+        FAIL() << "соединение осталось открытым: сервер молчит вместо закрытия";
+    } catch (const NetworkError&) {
+        SUCCEED();
+    }
+
+    // Сервер остался жив: acceptor не пострадал из-за одного закрытого
+    // соединения, и новое подключение принимается штатно. Полноценный
+    // обмен командой здесь не показателен: предел в 10 байт не пропустит
+    // даже {"type":"PING"} целиком, поэтому проверяется именно то, что
+    // связано с этим тестом, — сам acceptor остался открыт, а не то, что
+    // сервер умеет отвечать на команды при таком экстремальном пределе (это
+    // покрыто отдельными тестами с реалистичным max_message_size).
+    Client another(1024);
+    EXPECT_NO_THROW(another.connect("127.0.0.1", testServer.port()));
+}
+
 // Битый JSON не разрывает соединение — следующая команда в
 // том же соединении выполняется успешно.
 TEST(NetworkTest, InvalidJsonInSameConnectionThenPingSucceeds) {
@@ -645,15 +738,7 @@ TEST(NetworkTest, StopClosesAcceptorAndDrainsExistingSession) {
     // и подключение просто повисает до таймаута, вместо того чтобы
     // получить немедленный отказ (та же асимметрия, что уже устранена в
     // тесте превышения размера).
-    Client another(1024);
-    try {
-        another.connect("127.0.0.1", testServer.port());
-        FAIL() << "acceptor обязан был отказать в новом подключении";
-    } catch (const NetworkTimeoutError&) {
-        FAIL() << "подключение зависло до таймаута: acceptor не закрыт";
-    } catch (const NetworkError&) {
-        SUCCEED();
-    }
+    expectConnectFailsWithNetworkError("127.0.0.1", testServer.port(), 1024);
 }
 
 // Команды предметной области, ResponseSerializer, PRINT и идемпотентный
@@ -1385,15 +1470,90 @@ TEST(NetworkTest, ConnectToClosedPortFailsWithConnectionErrorNotTimeout) {
         closedPort = testServer.port();
     }
 
-    Client client(1024);
-    try {
-        client.connect("127.0.0.1", closedPort);
-        FAIL() << "подключение к закрытому порту обязано провалиться";
-    } catch (const NetworkTimeoutError&) {
-        FAIL() << "отказ в подключении обязан приходить обрывом, а не таймаутом";
-    } catch (const NetworkError&) {
-        SUCCEED();
+    expectConnectFailsWithNetworkError("127.0.0.1", closedPort, 1024);
+}
+
+// Замечание аудита покрытия: ветка Client::readExact(), где run_for(timeout_)
+// возвращается по истечении времени, а resultEc так и остался
+// would_block (NetworkTimeoutError), была покрыта только для случая, когда
+// сервер сам закрывает простаивающее соединение (IdleConnectionIsClosedAfter
+// ReadTimeout) — то есть таймаут там был серверным, а клиент лишь наблюдал
+// обрыв. Здесь же клиент не отправляет вообще ничего, поэтому сервер не
+// имеет повода ответить или закрыть соединение сам за отведённое клиенту
+// время (у TestServer readTimeout по умолчанию 60 секунд — заведомо больше
+// клиентского), и единственная причина, по которой receiveFrame() вообще
+// может завершиться, — это собственный таймаут клиента. Гонки со временем
+// здесь нет: ничего не происходит в принципе, поэтому клиентский таймаут
+// либо сработает детерминированно, либо тест зависнет и будет остановлен
+// ctest по общему пределу — что и требуется проверить.
+TEST(NetworkTest, ClientReceiveTimesOutWhenServerNeverResponds) {
+    TestServer testServer(1024);
+
+    Client client(1024, std::chrono::milliseconds(200));
+    client.connect("127.0.0.1", testServer.port());
+
+    EXPECT_THROW(client.receiveFrame(), NetworkTimeoutError);
+}
+
+// Замечание аудита покрытия: catch(const nlohmann::json::parse_error&) внутри
+// Client::request() не был достижим ни одним существующим тестом —
+// RequestRouter, стоящий за TestServer/ManualServer, всегда отвечает
+// корректным JSON, даже на ошибочные запросы. Единственный способ довести
+// клиента до этой ветки — сервер, отвечающий валидным по формату кадра, но
+// не-JSON телом; такого "сырого" сервера в файле раньше не было, и здесь он
+// собран из голых Boost.Asio-примитивов (acceptor + синхронные accept/read/
+// write в отдельном потоке), а не через Server/Session — Client тестируется
+// изолированно от остальной серверной части. Синхронный accept() безопасен
+// без дополнительной синхронизации ожидания готовности: acceptor уже
+// связан и слушает к моменту, когда test получает port() (bind/listen
+// синхронны, тот же приём, что и в Server).
+TEST(NetworkTest, ClientRequestThrowsNetworkErrorOnNonJsonResponsePayload) {
+    boost::asio::io_context rawIoContext;
+    boost::asio::ip::tcp::acceptor acceptor(
+        rawIoContext, boost::asio::ip::tcp::endpoint(boost::asio::ip::make_address("127.0.0.1"), 0));
+    const unsigned short port = acceptor.local_endpoint().port();
+
+    std::promise<void> serverDone;
+    std::future<void> serverDoneFuture = serverDone.get_future();
+    std::thread rawServer([&acceptor, &serverDone] {
+        try {
+            boost::asio::ip::tcp::socket socket(acceptor.get_executor());
+            acceptor.accept(socket);
+
+            const MessageCodec codec(4096);
+            std::array<char, kFrameHeaderSize> header{};
+            boost::asio::read(socket, boost::asio::buffer(header));
+            const std::uint32_t bodySize = codec.decodeHeader(header);
+            std::string body(bodySize, '\0');
+            if (bodySize > 0) {
+                boost::asio::read(socket, boost::asio::buffer(body));
+            }
+
+            // Ответ — валидный по формату кадра (правильный заголовок,
+            // правильная длина тела), но тело внутри не JSON вовсе.
+            boost::asio::write(socket, boost::asio::buffer(codec.encode("this is not json")));
+        } catch (const std::exception&) {
+            // Падение теста ниже произойдёт через EXPECT_THROW/дедлайн
+            // join() — здесь важно лишь не оставить поток с неотловленным
+            // исключением.
+        }
+        serverDone.set_value();
+    });
+
+    Client client(4096);
+    client.connect("127.0.0.1", port);
+    EXPECT_THROW(client.request(nlohmann::json::parse(R"({"type":"PING"})")), NetworkError);
+
+    // join() с ограничением по времени — тот же приём, что и в остальных
+    // тестах файла: висящий синхронный accept()/read() иначе увёл бы тест
+    // в зависание вместо падения.
+    constexpr std::chrono::seconds kTimeout(5);
+    if (serverDoneFuture.wait_for(kTimeout) != std::future_status::ready) {
+        ADD_FAILURE() << "вспомогательный сырой сервер не завершился за отведённое время";
+        std::fflush(nullptr);
+        std::_Exit(1);
     }
+    rawServer.join();
 }
 
 // Graceful shutdown (docs/task4/01-service-lifecycle.md). Сервер поднят
@@ -1620,6 +1780,79 @@ TEST(NetworkTest, StopSendsQueuedResponseBeforeClosingSocket) {
         std::_Exit(1);
     }
     reader.join();
+}
+
+// Замечание аудита покрытия: повторный Server::stop() (повторный SIGTERM
+// во время уже идущей остановки, docs/task4/01-service-lifecycle.md, раздел
+// 2.4) не был проверен ни при непустом реестре сессий. Ветка "if
+// (!stopping_)" внутри stop() обязана пропустить повторную инициализацию
+// дедлайна на втором вызове, а scheduleDrainCheck(), вызванный этим вторым
+// stop(), обязан безвредно перевзвести shutdownTimer_ поверх ещё не
+// сработавшего ожидания первой цепочки опроса — устаревший обработчик
+// первой цепочки получает operation_aborted и обязан тихо выйти (ветка "if
+// (ec) return;"), а не запустить вторую параллельную цепочку поверх первой.
+// Оба stop() вызваны из потока теста один за другим, до того как первая
+// цепочка опроса вообще успевает провести первую проверку (kDrainPollInterval
+// — 20 мс, а оба post() в очередь io_context выполняются практически сразу
+// друг за другом) — therefore второй стоп детерминированно отменяет ожидание
+// первого. Очередь записи сессии заведомо не пуста в момент обоих вызовов
+// (клиент прочитал только заголовок ответа на PRINT весом в мегабайты) —
+// иначе оба stop() увидели бы уже пустой реестр и не создали бы вообще
+// никакой цепочки опроса, а тест не проверял бы взаимодействие двух
+// цепочек.
+TEST(NetworkTest, StopCalledTwiceWhileDrainingIsIdempotentAndSessionStillCompletes) {
+    constexpr std::size_t kServerLimit = 2u * 1024u * 1024u;
+    TestServer testServer(kServerLimit);
+
+    constexpr int kOrderCount = 15000;
+    runInIoContext(testServer, [&testServer] {
+        for (int i = 0; i < kOrderCount; ++i) {
+            testServer.processor.restoreOrder(std::make_shared<Order>(
+                i + 1, Side::Buy, 100, 1, 1, i + 1, OrderStatus::Open));
+        }
+    });
+
+    boost::asio::io_context rawIoContext;
+    boost::asio::ip::tcp::socket rawSocket(rawIoContext);
+    rawSocket.connect(boost::asio::ip::tcp::endpoint(
+        boost::asio::ip::make_address("127.0.0.1"), testServer.port()));
+
+    const MessageCodec codec(kServerLimit);
+    boost::asio::write(rawSocket, boost::asio::buffer(codec.encode(R"({"type":"PRINT"})")));
+
+    std::array<char, kFrameHeaderSize> header{};
+    readExactWithDeadline(rawSocket, boost::asio::buffer(header), std::chrono::seconds(5));
+    const std::uint32_t bodySize = codec.decodeHeader(header);
+
+    testServer.server.stop();
+    testServer.server.stop();
+
+    // Дочитывание тела — блокирующая синхронная операция, ограниченная тем
+    // же приёмом ограничения по времени, что и в остальных тестах файла:
+    // работа во вспомогательном потоке, ожидание — с дедлайном.
+    std::promise<void> done;
+    std::future<void> doneFuture = done.get_future();
+    std::thread reader([&rawSocket, bodySize, kOrderCount, &done] {
+        std::string body(bodySize, '\0');
+        boost::asio::read(rawSocket, boost::asio::buffer(body));
+        const nlohmann::json response = nlohmann::json::parse(body);
+        EXPECT_EQ(response.at("status"), "OK");
+        EXPECT_EQ(response.at("result").at("buy").size(), static_cast<std::size_t>(kOrderCount));
+        done.set_value();
+    });
+
+    constexpr std::chrono::seconds kTimeout(10);
+    if (doneFuture.wait_for(kTimeout) != std::future_status::ready) {
+        ADD_FAILURE() << "сервер не прислал накопленный ответ после двойного stop()";
+        std::fflush(nullptr);
+        std::_Exit(1);
+    }
+    reader.join();
+
+    // Штатная остановка, а не по предельному времени: два stop() подряд не
+    // обязаны были сдвинуть дедлайн вперёд или удвоить работу настолько,
+    // чтобы понадобилось принудительное завершение.
+    EXPECT_FALSE(testServer.server.wasForceStopped());
 }
 
 // Session::readBody() безусловно вызывал readHeader() в конце, поэтому
@@ -3102,3 +3335,4 @@ TEST(NetworkTest, SignalHandlerStopsServerOnRealSigterm) {
     }
     destroyer.join();
 }
+

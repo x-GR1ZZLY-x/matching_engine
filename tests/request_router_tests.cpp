@@ -1,13 +1,19 @@
 #include <gtest/gtest.h>
 
+#include <optional>
 #include <string>
 
 #include <nlohmann/json.hpp>
 
 #include "command_processor.hpp"
+#include "pg_connection.hpp"
+#include "pg_result.hpp"
 #include "request_router.hpp"
+#include "test_database.hpp"
 
 using namespace matching_engine;
+using matching_engine::test::g_lastConnectFailure;
+using matching_engine::test::tryConnect;
 
 // RequestRouter вызывается напрямую, без сокета: его вход — уже отделённая
 // кодеком полезная нагрузка одного кадра, выход — RouteResult (payload +
@@ -236,4 +242,285 @@ TEST(RequestRouterTest, PrintEchoesCommandIdWhenProvided) {
 
     EXPECT_EQ(response.at("status"), "OK");
     EXPECT_EQ(response.at("command_id"), "cmd-print-1");
+}
+
+// HEALTH без соединения к БД (docs/task4/02-network-protocol.md, раздел
+// 3.3) — connection_ == nullptr, поэтому database обязано быть "DOWN", а не
+// "CONNECTED": буквенное значение по факту отсутствия указателя, а не
+// опрос несуществующего соединения.
+TEST(RequestRouterTest, HealthWithoutConnectionReportsDatabaseDown) {
+    CommandProcessor processor;
+    RequestRouter router(processor, nullptr);
+
+    const nlohmann::json response =
+        nlohmann::json::parse(router.handle(R"({"type":"HEALTH"})").payload);
+
+    EXPECT_EQ(response.at("status"), "OK");
+    EXPECT_EQ(response.at("database"), "DOWN");
+    EXPECT_EQ(response.at("engine"), "READY");
+}
+
+// HEALTH с живым соединением — противоположная ветка buildHealth():
+// PgConnection::isConnected() истинен, database обязано быть "CONNECTED".
+TEST(RequestRouterTest, HealthWithLiveConnectionReportsDatabaseConnected) {
+    auto connOpt = tryConnect();
+    if (!connOpt) {
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+
+    CommandProcessor processor;
+    RequestRouter router(processor, &*connOpt);
+
+    const nlohmann::json response =
+        nlohmann::json::parse(router.handle(R"({"type":"HEALTH"})").payload);
+
+    EXPECT_EQ(response.at("database"), "CONNECTED");
+}
+
+// Полезная нагрузка — синтаксически валидный JSON, но не объект (число
+// верхнего уровня). Отдельная ветка от UnparsableJsonHasNoCommandIdEcho
+// выше: там json::parse бросает, здесь разбор проходит успешно, но
+// проваливается проверка is_object()/contains("type").
+TEST(RequestRouterTest, TopLevelJsonNotObjectReturnsInvalidRequest) {
+    CommandProcessor processor;
+    RequestRouter router(processor, nullptr);
+
+    const nlohmann::json response = nlohmann::json::parse(router.handle("42").payload);
+
+    EXPECT_EQ(response.at("status"), "ERROR");
+    EXPECT_EQ(response.at("error"), "INVALID_REQUEST");
+}
+
+// Объект без поля "type" вовсе — та же ветка (contains("type") ложно), но
+// другой конкретный сценарий, чем "type" неверного типа ниже.
+TEST(RequestRouterTest, ObjectWithoutTypeFieldReturnsInvalidRequest) {
+    CommandProcessor processor;
+    RequestRouter router(processor, nullptr);
+
+    const nlohmann::json response = nlohmann::json::parse(router.handle("{}").payload);
+
+    EXPECT_EQ(response.at("status"), "ERROR");
+    EXPECT_EQ(response.at("error"), "INVALID_REQUEST");
+}
+
+// "type" присутствует, но не строка — третья вариация условия на строке
+// 212 request_router.cpp (is_object && contains(type) && is_string).
+TEST(RequestRouterTest, NonStringTypeFieldReturnsInvalidRequest) {
+    CommandProcessor processor;
+    RequestRouter router(processor, nullptr);
+
+    const nlohmann::json response =
+        nlohmann::json::parse(router.handle(R"({"type":5})").payload);
+
+    EXPECT_EQ(response.at("status"), "ERROR");
+    EXPECT_EQ(response.at("error"), "INVALID_REQUEST");
+}
+
+// Единственный путь handleDomainCommand(), до сих пор ни разу не пройденный
+// целиком с реальным соединением: успешная запись команды даёт
+// ResponseSerializer::success() с orderId и числом сделок в RouteResult
+// (route.orderId/route.tradesCount), а не только payload.
+TEST(RequestRouterTest, SuccessfulAddCommandReturnsSuccessResponse) {
+    auto connOpt = tryConnect();
+    if (!connOpt) {
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    auto& conn = *connOpt;
+
+    constexpr int kOrderId = 902200001;
+    conn.execute("DELETE FROM orders WHERE order_id = $1",
+        {std::optional<std::string>(std::to_string(kOrderId))});
+    conn.execute("DELETE FROM processed_commands WHERE command_id = $1",
+        {std::optional<std::string>("router-success-add")});
+
+    CommandProcessor processor;
+    RequestRouter router(processor, &conn);
+
+    nlohmann::json add;
+    add["type"] = "ADD";
+    add["order_id"] = kOrderId;
+    add["side"] = "BUY";
+    add["price"] = 100;
+    add["quantity"] = 3;
+    add["command_id"] = "router-success-add";
+
+    const RouteResult result = router.handle(add.dump());
+    const nlohmann::json response = nlohmann::json::parse(result.payload);
+
+    EXPECT_EQ(response.at("status"), "OK");
+    EXPECT_FALSE(result.fatal);
+    EXPECT_EQ(result.orderId, kOrderId);
+    EXPECT_EQ(result.tradesCount, 0u);
+
+    conn.execute("DELETE FROM orders WHERE order_id = $1",
+        {std::optional<std::string>(std::to_string(kOrderId))});
+    conn.execute("DELETE FROM processed_commands WHERE command_id = $1",
+        {std::optional<std::string>("router-success-add")});
+}
+
+// ADD с order_id уже открытой в книге заявки — MatchingEngine бросает
+// DuplicateOrderError, RequestRouter обязан отдать именно код
+// DUPLICATE_ORDER (отдельная ветка от общего INVALID_REQUEST).
+TEST(RequestRouterTest, AddWithDuplicateOrderIdReturnsDuplicateOrder) {
+    auto connOpt = tryConnect();
+    if (!connOpt) {
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    auto& conn = *connOpt;
+
+    constexpr int kOrderId = 902200002;
+    conn.execute("DELETE FROM orders WHERE order_id = $1",
+        {std::optional<std::string>(std::to_string(kOrderId))});
+    conn.execute("DELETE FROM processed_commands WHERE command_id = $1 OR command_id = $2",
+        {std::optional<std::string>("router-dup-1"), std::optional<std::string>("router-dup-2")});
+
+    CommandProcessor processor;
+    RequestRouter router(processor, &conn);
+
+    nlohmann::json first;
+    first["type"] = "ADD";
+    first["order_id"] = kOrderId;
+    first["side"] = "BUY";
+    first["price"] = 100;
+    first["quantity"] = 3;
+    first["command_id"] = "router-dup-1";
+    router.handle(first.dump());
+
+    nlohmann::json second;
+    second["type"] = "ADD";
+    second["order_id"] = kOrderId;
+    second["side"] = "BUY";
+    second["price"] = 100;
+    second["quantity"] = 5;
+    second["command_id"] = "router-dup-2";
+    const nlohmann::json response = nlohmann::json::parse(router.handle(second.dump()).payload);
+
+    EXPECT_EQ(response.at("status"), "ERROR");
+    EXPECT_EQ(response.at("error"), "DUPLICATE_ORDER");
+
+    conn.execute("DELETE FROM orders WHERE order_id = $1",
+        {std::optional<std::string>(std::to_string(kOrderId))});
+    conn.execute("DELETE FROM processed_commands WHERE command_id = $1 OR command_id = $2",
+        {std::optional<std::string>("router-dup-1"), std::optional<std::string>("router-dup-2")});
+}
+
+// MODIFY через RequestRouter — extractOrderId() до сих пор проходил только
+// ветку AddCommand/CancelCommand (тесты выше); ModifyCommand — отдельная
+// ветка dynamic_cast в extractOrderId (request_router.cpp:56), не
+// пройденная ни разу.
+TEST(RequestRouterTest, SuccessfulModifyCommandReturnsSuccessResponse) {
+    auto connOpt = tryConnect();
+    if (!connOpt) {
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    auto& conn = *connOpt;
+
+    constexpr int kOrderId = 902200003;
+    conn.execute("DELETE FROM orders WHERE order_id = $1",
+        {std::optional<std::string>(std::to_string(kOrderId))});
+    conn.execute("DELETE FROM processed_commands WHERE command_id = $1 OR command_id = $2",
+        {std::optional<std::string>("router-modify-add"),
+            std::optional<std::string>("router-modify-modify")});
+
+    CommandProcessor processor;
+    RequestRouter router(processor, &conn);
+
+    nlohmann::json add;
+    add["type"] = "ADD";
+    add["order_id"] = kOrderId;
+    add["side"] = "BUY";
+    add["price"] = 100;
+    add["quantity"] = 5;
+    add["command_id"] = "router-modify-add";
+    router.handle(add.dump());
+
+    nlohmann::json modify;
+    modify["type"] = "MODIFY";
+    modify["order_id"] = kOrderId;
+    modify["price"] = 100;
+    modify["quantity"] = 2;
+    modify["command_id"] = "router-modify-modify";
+
+    const RouteResult result = router.handle(modify.dump());
+    const nlohmann::json response = nlohmann::json::parse(result.payload);
+
+    EXPECT_EQ(response.at("status"), "OK");
+    EXPECT_EQ(result.orderId, kOrderId);
+
+    conn.execute("DELETE FROM orders WHERE order_id = $1",
+        {std::optional<std::string>(std::to_string(kOrderId))});
+    conn.execute("DELETE FROM processed_commands WHERE command_id = $1 OR command_id = $2",
+        {std::optional<std::string>("router-modify-add"),
+            std::optional<std::string>("router-modify-modify")});
+}
+
+// MARKET ADD (поле order_type) через RequestRouter — extractOrderId()
+// ветка MarketAddCommand, тоже ни разу не пройденная. MARKET-заявка без
+// встречной ликвидности не попадает в книгу (доменное правило проекта),
+// но команда всё равно успешно выполняется и сохраняется.
+TEST(RequestRouterTest, SuccessfulMarketAddCommandReturnsSuccessResponse) {
+    auto connOpt = tryConnect();
+    if (!connOpt) {
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    auto& conn = *connOpt;
+
+    constexpr int kOrderId = 902200004;
+    conn.execute("DELETE FROM orders WHERE order_id = $1",
+        {std::optional<std::string>(std::to_string(kOrderId))});
+    conn.execute("DELETE FROM processed_commands WHERE command_id = $1",
+        {std::optional<std::string>("router-market-add")});
+
+    CommandProcessor processor;
+    RequestRouter router(processor, &conn);
+
+    nlohmann::json marketAdd;
+    marketAdd["type"] = "ADD";
+    marketAdd["order_type"] = "MARKET";
+    marketAdd["order_id"] = kOrderId;
+    marketAdd["side"] = "BUY";
+    marketAdd["quantity"] = 5;
+    marketAdd["command_id"] = "router-market-add";
+
+    const RouteResult result = router.handle(marketAdd.dump());
+    const nlohmann::json response = nlohmann::json::parse(result.payload);
+
+    EXPECT_EQ(response.at("status"), "OK");
+    EXPECT_EQ(result.orderId, kOrderId);
+    EXPECT_EQ(result.tradesCount, 0u);
+
+    conn.execute("DELETE FROM orders WHERE order_id = $1",
+        {std::optional<std::string>(std::to_string(kOrderId))});
+    conn.execute("DELETE FROM processed_commands WHERE command_id = $1",
+        {std::optional<std::string>("router-market-add")});
+}
+
+// CANCEL на несуществующей заявке — MatchingEngine бросает OrderBookError,
+// RequestRouter обязан отдать ORDER_NOT_FOUND (отдельная ветка от
+// DUPLICATE_ORDER выше и от общего INVALID_REQUEST).
+TEST(RequestRouterTest, CancelNonexistentOrderReturnsOrderNotFound) {
+    auto connOpt = tryConnect();
+    if (!connOpt) {
+        GTEST_SKIP() << "База данных недоступна: " << g_lastConnectFailure;
+    }
+    auto& conn = *connOpt;
+
+    conn.execute("DELETE FROM processed_commands WHERE command_id = $1",
+        {std::optional<std::string>("router-cancel-missing")});
+
+    CommandProcessor processor;
+    RequestRouter router(processor, &conn);
+
+    nlohmann::json cancel;
+    cancel["type"] = "CANCEL";
+    cancel["order_id"] = 902200099;
+    cancel["command_id"] = "router-cancel-missing";
+
+    const nlohmann::json response = nlohmann::json::parse(router.handle(cancel.dump()).payload);
+
+    EXPECT_EQ(response.at("status"), "ERROR");
+    EXPECT_EQ(response.at("error"), "ORDER_NOT_FOUND");
+
+    conn.execute("DELETE FROM processed_commands WHERE command_id = $1",
+        {std::optional<std::string>("router-cancel-missing")});
 }

@@ -7,6 +7,7 @@
 #include <future>
 #include <optional>
 #include <pthread.h>
+#include <stdexcept>
 #include <thread>
 #include <unistd.h>
 
@@ -101,6 +102,146 @@ TEST(SignalHandlerTest, RealSigtermInvokesHandlerFromSignalThread) {
         // это и есть зависание, от которого тест обязан отличаться падением,
         // а не попыткой присоединить заблокированный поток (docs/task4/
         // 01-service-lifecycle.md, раздел 7.2, пункт 5).
+        std::fflush(nullptr);
+        std::_Exit(1);
+    }
+    destroyer.join();
+}
+
+// Тот же сценарий, что и выше, но SIGINT вместо SIGTERM — отдельная ветка
+// в run() (Logger::instance().info("Received SIGINT...")), которую
+// предыдущий тест не задевает вовсе: SIGTERM и SIGINT логируются разными
+// строками, хотя оба приводят к одному и тому же вызову onStop_. Если бы
+// SIGINT забыли добавить в маску (stopSignalSet()) или в развилку по
+// signalNumber, этот тест повис бы или не дождался вызова обработчика.
+TEST(SignalHandlerTest, RealSigintInvokesHandler) {
+    SignalMaskGuard maskGuard;
+    SignalHandler::blockSignals();
+
+    std::promise<void> invoked;
+    std::future<void> invokedFuture = invoked.get_future();
+    bool fulfilled = false;
+
+    std::optional<SignalHandler> handler;
+    handler.emplace([&invoked, &fulfilled] {
+        if (!fulfilled) {
+            fulfilled = true;
+            invoked.set_value();
+        }
+    });
+
+    ASSERT_EQ(::kill(::getpid(), SIGINT), 0);
+
+    constexpr std::chrono::seconds kTimeout(5);
+    ASSERT_EQ(invokedFuture.wait_for(kTimeout), std::future_status::ready)
+        << "обработчик остановки не был вызван по SIGINT за отведённое время";
+
+    std::promise<void> destroyed;
+    std::future<void> destroyedFuture = destroyed.get_future();
+    std::thread destroyer([&handler, &destroyed] {
+        handler.reset();
+        destroyed.set_value();
+    });
+    if (destroyedFuture.wait_for(kTimeout) != std::future_status::ready) {
+        ADD_FAILURE() << "SignalHandler не разрушился за отведённое время";
+        std::fflush(nullptr);
+        std::_Exit(1);
+    }
+    destroyer.join();
+}
+
+// REQ-THR-12: исключение, брошенное из onStop_ на штатном пути (после
+// настоящего SIGTERM), обязано быть перехвачено внутри run() (catch(const
+// std::exception&)), а не покинуть поток. Перехват сам вызывает onFailure_,
+// затем повторно onStop_ — на этот раз без исключения, чтобы тест мог
+// зафиксировать, что до этой точки дело дошло. Без этой защиты поток
+// завершился бы std::terminate, и деструктор SignalHandler завис бы на
+// join() навсегда — тест обязан поймать именно это, а не просто "не упал".
+TEST(SignalHandlerTest, ExceptionFromOnStopIsCaughtAndReportedViaOnFailure) {
+    SignalMaskGuard maskGuard;
+    SignalHandler::blockSignals();
+
+    std::promise<void> failureInvoked;
+    std::future<void> failureFuture = failureInvoked.get_future();
+    bool failureFulfilled = false;
+    int stopCallCount = 0;
+
+    std::optional<SignalHandler> handler;
+    handler.emplace(
+        [&stopCallCount] {
+            ++stopCallCount;
+            if (stopCallCount == 1) {
+                throw std::runtime_error("boom from onStop_");
+            }
+        },
+        [&failureInvoked, &failureFulfilled] {
+            if (!failureFulfilled) {
+                failureFulfilled = true;
+                failureInvoked.set_value();
+            }
+        });
+
+    ASSERT_EQ(::kill(::getpid(), SIGTERM), 0);
+
+    constexpr std::chrono::seconds kTimeout(5);
+    ASSERT_EQ(failureFuture.wait_for(kTimeout), std::future_status::ready)
+        << "onFailure_ не был вызван после исключения из onStop_ за отведённое время";
+
+    std::promise<void> destroyed;
+    std::future<void> destroyedFuture = destroyed.get_future();
+    std::thread destroyer([&handler, &destroyed] {
+        handler.reset();
+        destroyed.set_value();
+    });
+    if (destroyedFuture.wait_for(kTimeout) != std::future_status::ready) {
+        ADD_FAILURE() << "SignalHandler не разрушился за отведённое время";
+        std::fflush(nullptr);
+        std::_Exit(1);
+    }
+    destroyer.join();
+}
+
+// Та же гарантия REQ-THR-12, но для исключения, НЕ производного от
+// std::exception (catch(...) в run(), отдельная от catch(const
+// std::exception&) выше ветка).
+TEST(SignalHandlerTest, NonStdExceptionFromOnStopIsCaughtByCatchAll) {
+    SignalMaskGuard maskGuard;
+    SignalHandler::blockSignals();
+
+    std::promise<void> failureInvoked;
+    std::future<void> failureFuture = failureInvoked.get_future();
+    bool failureFulfilled = false;
+    int stopCallCount = 0;
+
+    std::optional<SignalHandler> handler;
+    handler.emplace(
+        [&stopCallCount] {
+            ++stopCallCount;
+            if (stopCallCount == 1) {
+                throw 42; // не std::exception — должно поймать catch(...).
+            }
+        },
+        [&failureInvoked, &failureFulfilled] {
+            if (!failureFulfilled) {
+                failureFulfilled = true;
+                failureInvoked.set_value();
+            }
+        });
+
+    ASSERT_EQ(::kill(::getpid(), SIGTERM), 0);
+
+    constexpr std::chrono::seconds kTimeout(5);
+    ASSERT_EQ(failureFuture.wait_for(kTimeout), std::future_status::ready)
+        << "onFailure_ не был вызван после не-std::exception из onStop_ за отведённое время";
+
+    std::promise<void> destroyed;
+    std::future<void> destroyedFuture = destroyed.get_future();
+    std::thread destroyer([&handler, &destroyed] {
+        handler.reset();
+        destroyed.set_value();
+    });
+    if (destroyedFuture.wait_for(kTimeout) != std::future_status::ready) {
+        ADD_FAILURE() << "SignalHandler не разрушился за отведённое время";
         std::fflush(nullptr);
         std::_Exit(1);
     }

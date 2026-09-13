@@ -218,3 +218,20 @@ TEST(ApplicationParseArgsTest, BatchOptionWithPositionalJsonFails){
     EXPECT_FALSE(ok);
     EXPECT_FALSE(error.empty());
 }
+
+// Ни --replay, ни позиционного JSON-аргумента вовсе — последняя ветка
+// parseArgs (`if(!hasReplay && !hasJsonArg)`), до этой правки не
+// покрытая ни одним тестом. errorMessage в этом случае — не произвольная
+// строка, а ровно usage-текст: run() различает это сообщение от прочих
+// ошибок разбора, чтобы решить, печатать его как ERROR: или как обычный
+// usage без этого префикса (см. ApplicationRunWithNoArgsPrintsUsage в
+// integration_tests.cpp).
+TEST(ApplicationParseArgsTest, NoReplayAndNoPositionalArgFailsWithUsage){
+    std::string configPath, jsonArg, replayPath, error;
+    bool batch = false;
+
+    const bool ok = callParseArgs({}, configPath, jsonArg, replayPath, batch, error);
+
+    EXPECT_FALSE(ok);
+    EXPECT_NE(error.find("Usage:"), std::string::npos);
+}
